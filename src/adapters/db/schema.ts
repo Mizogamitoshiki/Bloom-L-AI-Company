@@ -84,6 +84,17 @@ export const posts = sqliteTable("posts", {
   rightsState: text("rights_state").notNull().default("n/a"),
 });
 
+export const qaReviews = sqliteTable("qa_reviews", {
+  id: text("id").primaryKey(),
+  postId: text("post_id").notNull(),
+  artifactId: text("artifact_id"),
+  result: text("result").notNull(), // pass | fail | blocked_rights(V3)
+  checklistJson: text("checklist_json"),
+  issuesJson: text("issues_json"),
+  reviewerId: text("reviewer_id").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const approvals = sqliteTable("approvals", {
   id: text("id").primaryKey(),
   subjectType: text("subject_type").notNull(),

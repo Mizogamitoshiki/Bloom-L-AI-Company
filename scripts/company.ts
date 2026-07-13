@@ -18,6 +18,14 @@
  *   pnpm company resume --task <id> [--actor owner]
  *   pnpm company status                       会社状態JSON
  *   pnpm company events --task <id>           タスクのイベント一覧
+ *   pnpm company create-post --json '<{pillar,format,title,plannedDate?}>'
+ *   pnpm company render --post <id>           カルーセルPNG生成(文字あふれ検査込み・通常コード)
+ *   pnpm company qa --task <id> --file <report.json>   QA提出(合格で承認キューへ)
+ *   pnpm company queue                        承認キュー一覧JSON
+ *
+ * 注意: 承認・却下・修正依頼のコマンドは存在しない。
+ * 公開判断は代表者がNext.js UI(/approvals)から行う唯一の経路であり、
+ * AI社員・オーケストレーターはこのCLIから承認操作を実行できない(P1指摘1, 2026-07-13)。
  */
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
@@ -32,15 +40,21 @@ import {
   startTask,
   heartbeat,
   submitArtifact,
+  submitQa,
   failTask,
   cancelTask,
   resumeTask,
   getCompanyState,
   setSetting,
+  createPost,
+  listApprovalQueue,
 } from "../src/adapters/db/store";
 import { seedDemo } from "../src/adapters/db/demo";
 import { planCommitSchema, taskSpecSchema } from "../src/core/schemas";
 import { todayLocal } from "../src/core/ids";
+import { renderPost } from "../src/adapters/render/render-post";
+import { OverflowError } from "../src/adapters/render/renderer";
+import { z } from "zod";
 
 const HELP_HINT = "ヘルプ: scripts/company.ts の冒頭コメントを参照";
 
@@ -63,6 +77,7 @@ const { values: args } = parseArgs({
     json: { type: "string" },
     task: { type: "string" },
     run: { type: "string" },
+    post: { type: "string" },
     stage: { type: "string" },
     error: { type: "string" },
     actor: { type: "string", default: "system" },
@@ -73,6 +88,28 @@ const { values: args } = parseArgs({
 
 const { db } = openDb();
 const actor = args.actor ?? "system";
+
+const createPostInputSchema = z
+  .object({
+    pillar: z.enum(["1", "2", "3", "4", "5", "6"]),
+    format: z.string().min(1).max(30),
+    title: z.string().min(1).max(120),
+    plannedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  })
+  .strict();
+
+/** render: 実体は src/adapters/render/render-post.ts(テストと共用) */
+async function renderCommand(postId: string): Promise<void> {
+  try {
+    const result = await renderPost(db, postId, actor);
+    out({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof OverflowError) {
+      fail(`${err.message} → 琴葉への短縮タスクを自動生成しました`);
+    }
+    throw err;
+  }
+}
 
 try {
   switch (command) {
@@ -170,6 +207,29 @@ try {
         .orderBy(asc(t.taskEvents.seq))
         .all();
       out(events);
+      break;
+    }
+    case "create-post": {
+      if (!args.json) fail("--json '<{pillar,format,title,plannedDate?}>' が必要です");
+      const input = createPostInputSchema.parse(JSON.parse(args.json));
+      const post = createPost(db, input, actor);
+      out({ ok: true, id: post.id, status: post.status });
+      break;
+    }
+    case "render": {
+      if (!args.post) fail("--post <id> が必要です");
+      await renderCommand(args.post);
+      break;
+    }
+    case "qa": {
+      if (!args.task || !args.file) fail("--task <id> --file <report.json> が必要です");
+      const content: unknown = JSON.parse(readFileSync(args.file, "utf8"));
+      const r = submitQa(db, args.task, content, actor);
+      out({ ok: true, artifactId: r.artifactId, result: r.result, message: r.result === "pass" ? "承認キューへ移動しました" : "draftingへ差し戻しました" });
+      break;
+    }
+    case "queue": {
+      out(listApprovalQueue(db));
       break;
     }
     default:

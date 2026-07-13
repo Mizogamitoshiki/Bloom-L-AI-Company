@@ -69,10 +69,10 @@ export default function HomePage(): JSX.Element {
                   : `最終run: ${state.run.status === "done" ? "正常終了" : "異常終了(回収済み)"}`
                 : "まだ稼働していません"}
             </span>
-            <span className="stat" data-alert={state.counts.awaitingApproval > 0}>
+            <a className="stat" data-alert={state.counts.awaitingApproval > 0} href="/approvals" style={{ color: "inherit", textDecoration: "none" }}>
               <IconStamp size={13} />
-              承認待ち {state.counts.awaitingApproval}件
-            </span>
+              承認待ち {state.counts.awaitingApproval}件 →
+            </a>
             <span className="stat" data-alert={state.counts.errors > 0}>
               <IconAlert size={13} />
               エラー/状態不明 {state.counts.errors}件

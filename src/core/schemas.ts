@@ -85,8 +85,38 @@ export const postPlanArtifactSchema = z
     sourceIds: z.array(z.string()).max(10).default([]),
   })
   .strict();
+export type PostPlan = z.infer<typeof postPlanArtifactSchema>;
 
-/** キャプション(docs/05 琴葉の出力、文字数上限はテンプレ実測で更新) */
+/**
+ * カルーセルのスライド文言(tpl-howto用スロット)。
+ * 文字数上限は Noto Sans JP での実測(セーフエリア64px・所定フォントサイズ)に基づく第1層の文字あふれ防止。
+ * 第2層はレンダラーのSatori実測(measureSlotOverflows)。
+ */
+export const slidesSchema = z
+  .object({
+    cover: z
+      .object({
+        title: z.string().min(4).max(26),
+        subtitle: z.string().max(36),
+      })
+      .strict(),
+    pages: z
+      .array(
+        z
+          .object({
+            heading: z.string().min(2).max(20),
+            body: z.string().min(4).max(90),
+          })
+          .strict(),
+      )
+      .min(3)
+      .max(6),
+    ctaMessage: z.string().min(4).max(60),
+  })
+  .strict();
+export type Slides = z.infer<typeof slidesSchema>;
+
+/** キャプション+スライド文言(docs/05 琴葉の出力) */
 export const copyArtifactSchema = z
   .object({
     kind: z.literal("copy"),
@@ -94,16 +124,68 @@ export const copyArtifactSchema = z
     body: z.string().min(10).max(1800),
     cta: z.string().min(4).max(120),
     hashtags: z.array(z.string().regex(/^#\S+$/).max(40)).min(5).max(15),
+    slides: slidesSchema,
   })
   .strict();
+export type Copy = z.infer<typeof copyArtifactSchema>;
+
+/**
+ * カルーセル仕様(レンダラー入力。通常コードがslides+planから構築する)。
+ * sourceCopyArtifactId: 入力になったcopy成果物の不変ID。
+ * QA合格ゲートは「最新copy = spec.sourceCopyArtifactId」の一致で検証する(version番号の偶然一致に依存しない)。
+ */
+export const carouselSpecSchema = z
+  .object({
+    kind: z.literal("carousel_spec"),
+    templateId: z.literal("tpl-howto"),
+    pillar: z.enum(["1", "2", "3", "4", "5", "6"]),
+    sourceCopyArtifactId: z.string().min(1),
+    slides: slidesSchema,
+  })
+  .strict();
+export type CarouselSpec = z.infer<typeof carouselSpecSchema>;
+
+/** レンダリング画像成果物のメタデータ(artifacts.content_json、kind="image") */
+export const imageMetaSchema = z
+  .object({
+    specArtifactId: z.string().min(1),
+    sourceCopyArtifactId: z.string().min(1),
+    page: z.number().int().min(1),
+    pageCount: z.number().int().min(3),
+  })
+  .strict();
+export type ImageMeta = z.infer<typeof imageMetaSchema>;
+
+/** QAレポート(docs/05 紫苑の出力) */
+export const qaReportArtifactSchema = z
+  .object({
+    kind: z.literal("qa_report"),
+    result: z.enum(["pass", "fail"]),
+    checklist: z
+      .array(
+        z
+          .object({
+            item: z.string().min(1).max(80),
+            ok: z.boolean(),
+            note: z.string().max(200).optional(),
+          })
+          .strict(),
+      )
+      .min(3),
+    issues: z.array(z.string().max(200)).default([]),
+  })
+  .strict();
+export type QaReport = z.infer<typeof qaReportArtifactSchema>;
 
 export const artifactContentSchema = z.discriminatedUnion("kind", [
   noteArtifactSchema,
   postPlanArtifactSchema,
   copyArtifactSchema,
+  carouselSpecSchema,
+  qaReportArtifactSchema,
 ]);
 export type ArtifactContent = z.infer<typeof artifactContentSchema>;
-export const ARTIFACT_KINDS = ["note", "post_plan", "copy"] as const;
+export const ARTIFACT_KINDS = ["note", "post_plan", "copy", "carousel_spec", "qa_report", "image"] as const;
 
 export const modelProfileSchema = z.enum(MODEL_PROFILES);
 

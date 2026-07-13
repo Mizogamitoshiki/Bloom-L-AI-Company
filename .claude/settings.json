@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm company *)",
+      "Bash(pnpm --silent company *)",
+      "Bash(pnpm test)",
+      "Bash(pnpm typecheck)"
+    ]
+  }
+}

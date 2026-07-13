@@ -6,6 +6,7 @@
  * - リトライ上限・冪等性・状態遷移ガード・参照存在確認をここで強制
  * - 複数書き込みを伴う操作は1トランザクション(途中失敗で全ロールバック)
  */
+import { existsSync } from "node:fs";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { RunResult } from "better-sqlite3";
@@ -17,9 +18,18 @@ import {
   eventPayloadSchema,
   taskSpecSchema,
   artifactContentSchema,
+  carouselSpecSchema,
+  imageMetaSchema,
+  qaReportArtifactSchema,
+  postPlanArtifactSchema,
+  copyArtifactSchema,
   SCHEMA_VERSION,
   type EventPayload,
   type TaskSpec,
+  type CarouselSpec,
+  type QaReport,
+  type PostPlan,
+  type Copy,
 } from "../../core/schemas";
 import {
   type TaskEventType,
@@ -28,7 +38,13 @@ import {
   type TaskEventRow,
   type TaskType,
 } from "../../core/domain";
-import { assertTaskTransition, deriveEmployeeDisplay, type EmployeeDisplay } from "../../core/reducers";
+import {
+  assertTaskTransition,
+  assertPostTransition,
+  deriveEmployeeDisplay,
+  type EmployeeDisplay,
+} from "../../core/reducers";
+import type { PostStatus } from "../../core/domain";
 import { DEPARTMENTS, EMPLOYEES } from "../../core/org";
 import { loadLimits } from "../config";
 
@@ -158,48 +174,56 @@ export function buildIdempotencyKey(spec: TaskSpec, runDate: string): string {
   return [runDate, spec.type, spec.assigneeId, spec.postId ?? "-", step].join(":");
 }
 
+/** トランザクション内版。既存キーがあれば既存タスクを返す(冪等) */
+function createTaskIn(conn: DbConn, specInput: TaskSpec, runDate: string, actor = "system"): typeof t.tasks.$inferSelect {
+  const spec = taskSpecSchema.parse(specInput);
+  const key = buildIdempotencyKey(spec, runDate);
+  const existing = conn.select().from(t.tasks).where(eq(t.tasks.idempotencyKey, key)).get();
+  if (existing) return existing;
+
+  assertEmployeeExists(conn, spec.assigneeId);
+  if (spec.postId) assertPostExists(conn, spec.postId);
+
+  const limits = loadLimits();
+  const countToday = conn
+    .select({ n: sql<number>`count(*)` })
+    .from(t.tasks)
+    .where(eq(t.tasks.runDate, runDate))
+    .get();
+  if ((countToday?.n ?? 0) >= limits.daily.max_tasks) {
+    throw new Error(`日次タスク上限(${limits.daily.max_tasks})に達しています(docs/14)`);
+  }
+
+  const task: typeof t.tasks.$inferInsert = {
+    id: ulid(),
+    idempotencyKey: key,
+    type: spec.type,
+    title: spec.title,
+    assigneeId: spec.assigneeId,
+    postId: spec.postId ?? null,
+    status: "queued",
+    priority: spec.priority,
+    inputJson: spec.input ? JSON.stringify(spec.input) : null,
+    retryCount: 0,
+    runDate,
+    error: null,
+    createdAt: nowIso(),
+    startedAt: null,
+    finishedAt: null,
+  };
+  conn.insert(t.tasks).values(task).run();
+  appendEvent(conn, task.id, "created", actor);
+  appendEvent(conn, task.id, "queued", actor);
+  return conn.select().from(t.tasks).where(eq(t.tasks.id, task.id)).get()!;
+}
+
 export function createTask(db: Db, specInput: TaskSpec, runDate: string, actor = "system"): CreateTaskResult {
   const spec = taskSpecSchema.parse(specInput);
   const key = buildIdempotencyKey(spec, runDate);
-
   return db.transaction((tx): CreateTaskResult => {
     const existing = tx.select().from(t.tasks).where(eq(t.tasks.idempotencyKey, key)).get();
     if (existing) return { task: existing, created: false };
-
-    assertEmployeeExists(tx, spec.assigneeId);
-    if (spec.postId) assertPostExists(tx, spec.postId);
-
-    const limits = loadLimits();
-    const countToday = tx
-      .select({ n: sql<number>`count(*)` })
-      .from(t.tasks)
-      .where(eq(t.tasks.runDate, runDate))
-      .get();
-    if ((countToday?.n ?? 0) >= limits.daily.max_tasks) {
-      throw new Error(`日次タスク上限(${limits.daily.max_tasks})に達しています(docs/14)`);
-    }
-
-    const task: typeof t.tasks.$inferInsert = {
-      id: ulid(),
-      idempotencyKey: key,
-      type: spec.type,
-      title: spec.title,
-      assigneeId: spec.assigneeId,
-      postId: spec.postId ?? null,
-      status: "queued",
-      priority: spec.priority,
-      inputJson: spec.input ? JSON.stringify(spec.input) : null,
-      retryCount: 0,
-      runDate,
-      error: null,
-      createdAt: nowIso(),
-      startedAt: null,
-      finishedAt: null,
-    };
-    tx.insert(t.tasks).values(task).run();
-    appendEvent(tx, task.id, "created", actor);
-    appendEvent(tx, task.id, "queued", actor);
-    return { task: tx.select().from(t.tasks).where(eq(t.tasks.id, task.id)).get()!, created: true };
+    return { task: createTaskIn(tx, spec, runDate, actor), created: true };
   });
 }
 
@@ -241,6 +265,66 @@ export interface SubmitResult {
   artifactId: string;
 }
 
+/**
+ * 成果物バージョン: 投稿に紐づく成果物は (postId, kind) 単位で採番する。
+ * 修正依頼→再制作は別タスクになるため、taskId単位では版が繋がらない(AC-17)。
+ */
+function nextArtifactVersion(conn: DbConn, task: typeof t.tasks.$inferSelect, kind: string): number {
+  const scope = task.postId
+    ? and(eq(t.artifacts.postId, task.postId), eq(t.artifacts.kind, kind))
+    : and(eq(t.artifacts.taskId, task.id), eq(t.artifacts.kind, kind));
+  const prev = conn.select({ v: sql<number>`coalesce(max(version), 0)` }).from(t.artifacts).where(scope).get();
+  return (prev?.v ?? 0) + 1;
+}
+
+function insertContentArtifactIn(
+  conn: DbConn,
+  task: typeof t.tasks.$inferSelect,
+  validated: { kind: string },
+  actor: string,
+): string {
+  const artifactId = ulid();
+  conn
+    .insert(t.artifacts)
+    .values({
+      id: artifactId,
+      taskId: task.id,
+      postId: task.postId,
+      kind: validated.kind,
+      version: nextArtifactVersion(conn, task, validated.kind),
+      contentJson: JSON.stringify(validated),
+      filePath: null,
+      schemaVersion: SCHEMA_VERSION,
+      createdAt: nowIso(),
+    })
+    .run();
+  appendEvent(conn, task.id, "artifact_added", actor, { artifactId });
+  return artifactId;
+}
+
+function completeTaskIn(
+  conn: DbConn,
+  task: typeof t.tasks.$inferSelect,
+  actor: string,
+  opts: { estInputChars?: number; estOutputChars?: number } = {},
+): void {
+  setTaskStatus(conn, task, "done", { finishedAt: nowIso(), error: null });
+  appendEvent(conn, task.id, "succeeded", actor);
+  const started = task.startedAt ? new Date(task.startedAt).getTime() : Date.now();
+  conn
+    .insert(t.usageRecords)
+    .values({
+      id: ulid(),
+      taskId: task.id,
+      modelProfile: getEmployeeProfile(conn, task.assigneeId),
+      estInputChars: opts.estInputChars ?? 0,
+      estOutputChars: opts.estOutputChars ?? 0,
+      wallSeconds: Math.max(0, Math.round((Date.now() - started) / 1000)),
+      ts: nowIso(),
+    })
+    .run();
+}
+
 /** 成果物提出 → 検証OKならタスク完了+利用量記録(全体で1トランザクション) */
 export function submitArtifact(
   db: Db,
@@ -255,42 +339,18 @@ export function submitArtifact(
     const task = getTaskOrThrow(tx, taskId);
     if (task.status !== "running") throw new Error(`runningでないタスクには提出できません(現在: ${task.status})`);
 
-    const prevVersions = tx
-      .select({ v: sql<number>`coalesce(max(version), 0)` })
-      .from(t.artifacts)
-      .where(and(eq(t.artifacts.taskId, taskId), eq(t.artifacts.kind, validated.kind)))
-      .get();
+    const artifactId = insertContentArtifactIn(tx, task, validated, actor);
 
-    const artifactId = ulid();
-    tx.insert(t.artifacts)
-      .values({
-        id: artifactId,
-        taskId,
-        postId: task.postId,
-        kind: validated.kind,
-        version: (prevVersions?.v ?? 0) + 1,
-        contentJson: JSON.stringify(validated),
-        filePath: null,
-        schemaVersion: SCHEMA_VERSION,
-        createdAt: nowIso(),
-      })
-      .run();
-    appendEvent(tx, taskId, "artifact_added", actor, { artifactId });
-    setTaskStatus(tx, task, "done", { finishedAt: nowIso(), error: null });
-    appendEvent(tx, taskId, "succeeded", actor);
+    // 投稿ライフサイクルの自動遷移: 企画(post_plan)提出で idea → drafting(docs/06)
+    if (validated.kind === "post_plan" && task.postId) {
+      const post = getPostOrThrow(tx, task.postId);
+      if (post.status === "idea") setPostStatus(tx, post, "drafting");
+    }
 
-    const started = task.startedAt ? new Date(task.startedAt).getTime() : Date.now();
-    tx.insert(t.usageRecords)
-      .values({
-        id: ulid(),
-        taskId,
-        modelProfile: getEmployeeProfile(tx, task.assigneeId),
-        estInputChars: opts.estInputChars ?? 0,
-        estOutputChars: opts.estOutputChars ?? JSON.stringify(validated).length,
-        wallSeconds: Math.max(0, Math.round((Date.now() - started) / 1000)),
-        ts: nowIso(),
-      })
-      .run();
+    completeTaskIn(tx, task, actor, {
+      estInputChars: opts.estInputChars ?? 0,
+      estOutputChars: opts.estOutputChars ?? JSON.stringify(validated).length,
+    });
     return { artifactId };
   });
 }
@@ -305,7 +365,13 @@ function getEmployeeProfile(conn: DbConn, employeeId: string): string {
  * リトライ時: error には直近の失敗理由を保持(表示はstatus=failedの場合のみ「エラー」扱い)、
  * startedAt は次のstartで上書きされるためnullへ戻す。
  */
-export function failTask(db: Db, taskId: string, error: string, actor: string): { retried: boolean } {
+export function failTask(
+  db: Db,
+  taskId: string,
+  error: string,
+  actor: string,
+  opts: { fatal?: boolean } = {},
+): { retried: boolean } {
   const message = error.slice(0, 500);
   return db.transaction((tx): { retried: boolean } => {
     const task = getTaskOrThrow(tx, taskId);
@@ -322,7 +388,8 @@ export function failTask(db: Db, taskId: string, error: string, actor: string): 
       throw new Error(`失敗を記録できない状態です(現在: ${task.status})`);
     }
     const limits = loadLimits();
-    if (task.retryCount < limits.retry.per_task) {
+    // fatal: 同一入力の再試行が無意味な失敗(文字あふれ等)はリトライせず即failed
+    if (!opts.fatal && task.retryCount < limits.retry.per_task) {
       tx.update(t.tasks)
         .set({ status: "queued", retryCount: task.retryCount + 1, error: message, startedAt: null })
         .where(eq(t.tasks.id, taskId))
@@ -434,6 +501,370 @@ export function runFinish(db: Db, runId: string, actor = "system", note?: string
     tx.update(t.runs).set({ status: "done", finishedAt: nowIso(), note: note ?? null }).where(eq(t.runs.id, runId)).run();
     audit(tx, actor, "run_finish", "run", runId);
   });
+}
+
+// ---------- 投稿ライフサイクル(docs/06 §3) ----------
+
+function getPostOrThrow(conn: DbConn, postId: string): typeof t.posts.$inferSelect {
+  const post = conn.select().from(t.posts).where(eq(t.posts.id, postId)).get();
+  if (!post) throw new Error(`投稿が見つかりません: ${postId}`);
+  return post;
+}
+
+function setPostStatus(
+  conn: DbConn,
+  post: typeof t.posts.$inferSelect,
+  to: PostStatus,
+  patch: Partial<typeof t.posts.$inferInsert> = {},
+): void {
+  assertPostTransition(post.status as PostStatus, to);
+  conn.update(t.posts).set({ status: to, ...patch }).where(eq(t.posts.id, post.id)).run();
+}
+
+export interface CreatePostInput {
+  pillar: "1" | "2" | "3" | "4" | "5" | "6";
+  format: string;
+  title: string;
+  plannedDate?: string;
+}
+
+export function createPost(db: Db, input: CreatePostInput, actor = "system"): typeof t.posts.$inferSelect {
+  return db.transaction((tx) => {
+    const id = ulid();
+    tx.insert(t.posts)
+      .values({
+        id,
+        pillar: input.pillar,
+        format: input.format,
+        title: input.title,
+        status: "idea",
+        plannedDate: input.plannedDate ?? null,
+        publishMethod: "manual",
+        rightsState: "n/a",
+      })
+      .run();
+    audit(tx, actor, "post_create", "post", id, { title: input.title, pillar: input.pillar });
+    return tx.select().from(t.posts).where(eq(t.posts.id, id)).get()!;
+  });
+}
+
+/**
+ * QA合格の前提となる成果物整合性ゲート(P1指摘2, 2026-07-13)。
+ * 「最新copy → それを入力に生成したcarousel_spec → そのspecに紐づくPNG一式」の連鎖を
+ * 不変ID(sourceCopyArtifactId / specArtifactId)で検証する。version番号の偶然一致に依存しない。
+ * 承認(decidePost approved)時にも最終防御として再実行する。
+ */
+export function assertPostContentIntegrity(conn: DbConn, postId: string): {
+  copyArtifactId: string;
+  specArtifactId: string;
+  imageArtifactIds: string[];
+} {
+  const arts = conn
+    .select()
+    .from(t.artifacts)
+    .where(eq(t.artifacts.postId, postId))
+    .orderBy(desc(t.artifacts.version), desc(t.artifacts.createdAt))
+    .all();
+  const plan = arts.find((a) => a.kind === "post_plan");
+  if (!plan) throw new Error("整合性エラー: 最新のpost_plan成果物がありません");
+  const copy = arts.find((a) => a.kind === "copy");
+  if (!copy) throw new Error("整合性エラー: 最新のcopy成果物がありません");
+  const spec = arts.find((a) => a.kind === "carousel_spec");
+  if (!spec?.contentJson) throw new Error("整合性エラー: carousel_specがありません(未レンダリング)");
+  const specContent = carouselSpecSchema.parse(JSON.parse(spec.contentJson));
+  if (specContent.sourceCopyArtifactId !== copy.id) {
+    throw new Error(
+      `整合性エラー: 最新copy(v${copy.version})から生成された画像がありません(現在の画像はcopy ${specContent.sourceCopyArtifactId} 由来)。再レンダリングが必要です`,
+    );
+  }
+  const images = arts.filter((a) => {
+    if (a.kind !== "image" || !a.contentJson) return false;
+    try {
+      return imageMetaSchema.parse(JSON.parse(a.contentJson)).specArtifactId === spec.id;
+    } catch {
+      return false;
+    }
+  });
+  const expected = specContent.slides.pages.length + 2;
+  if (images.length !== expected) {
+    throw new Error(`整合性エラー: 画像枚数が不一致(${images.length}枚 / 期待${expected}枚)`);
+  }
+  for (const img of images) {
+    if (!img.filePath || !existsSync(img.filePath)) {
+      throw new Error(`整合性エラー: 画像ファイルが存在しません(${img.filePath ?? img.id})`);
+    }
+  }
+  return { copyArtifactId: copy.id, specArtifactId: spec.id, imageArtifactIds: images.map((a) => a.id) };
+}
+
+/**
+ * QA提出(紫苑のタスク完了+qa_reviews記録+投稿遷移を1トランザクションで)。
+ * pass: drafting→qa_review→awaiting_approval / fail: →qa_review→drafting(差し戻し)。
+ * QA合格のみが承認キューへ進む(§14, AC-15)。
+ * passには成果物整合性ゲート(assertPostContentIntegrity)を通過する必要がある(P1指摘2)。
+ */
+export function submitQa(db: Db, taskId: string, content: unknown, actor: string): SubmitResult & { result: QaReport["result"] } {
+  const report = qaReportArtifactSchema.parse(content);
+  return db.transaction((tx) => {
+    const task = getTaskOrThrow(tx, taskId);
+    if (task.type !== "qa") throw new Error(`QA提出はtype=qaのタスクからのみ可能です(現在: ${task.type})`);
+    if (task.assigneeId !== "emp_shion") {
+      throw new Error(`QA提出は品質管理担当(emp_shion)のタスクからのみ可能です(現在: ${task.assigneeId})`);
+    }
+    if (task.status !== "running") throw new Error(`runningでないタスクには提出できません(現在: ${task.status})`);
+    if (!task.postId) throw new Error("QAタスクにpostIdがありません");
+    const post = getPostOrThrow(tx, task.postId);
+
+    // pass時のみ: 最新copy→spec→PNG一式の連鎖を検証(failは従来どおりdrafting差し戻し)
+    if (report.result === "pass") {
+      assertPostContentIntegrity(tx, post.id);
+    }
+
+    const artifactId = insertContentArtifactIn(tx, task, report, actor);
+    tx.insert(t.qaReviews)
+      .values({
+        id: ulid(),
+        postId: post.id,
+        artifactId,
+        result: report.result,
+        checklistJson: JSON.stringify(report.checklist),
+        issuesJson: JSON.stringify(report.issues),
+        reviewerId: task.assigneeId,
+        createdAt: nowIso(),
+      })
+      .run();
+
+    if (post.status === "drafting") setPostStatus(tx, post, "qa_review");
+    const inReview = getPostOrThrow(tx, post.id);
+    if (report.result === "pass") {
+      setPostStatus(tx, inReview, "awaiting_approval");
+    } else {
+      setPostStatus(tx, inReview, "drafting");
+    }
+    audit(tx, actor, "qa_review", "post", post.id, { result: report.result, issues: report.issues.length });
+    completeTaskIn(tx, task, actor, { estOutputChars: JSON.stringify(report).length });
+    return { artifactId, result: report.result };
+  });
+}
+
+/** レンダリング成果物の登録(通常コードのレンダラーから呼ぶ)。spec+画像+タスク完了を1トランザクションで */
+export function addRenderArtifacts(
+  db: Db,
+  taskId: string,
+  spec: CarouselSpec,
+  files: string[],
+  actor = "system",
+): { specArtifactId: string; imageArtifactIds: string[] } {
+  const validated = carouselSpecSchema.parse(spec);
+  if (files.length === 0) throw new Error("画像ファイルがありません");
+  return db.transaction((tx) => {
+    const task = getTaskOrThrow(tx, taskId);
+    if (task.status !== "running") throw new Error(`runningでないタスクには登録できません(現在: ${task.status})`);
+    const specArtifactId = insertContentArtifactIn(tx, task, validated, actor);
+    const batchVersion = nextArtifactVersion(tx, task, "image");
+    const imageArtifactIds: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]!;
+      const meta = imageMetaSchema.parse({
+        specArtifactId,
+        sourceCopyArtifactId: validated.sourceCopyArtifactId,
+        page: i + 1,
+        pageCount: files.length,
+      });
+      const id = ulid();
+      tx.insert(t.artifacts)
+        .values({
+          id,
+          taskId: task.id,
+          postId: task.postId,
+          kind: "image",
+          version: batchVersion,
+          contentJson: JSON.stringify(meta),
+          filePath: file,
+          schemaVersion: SCHEMA_VERSION,
+          createdAt: nowIso(),
+        })
+        .run();
+      imageArtifactIds.push(id);
+    }
+    appendEvent(tx, taskId, "stage_changed", actor, { stage: `画像${files.length}枚を生成` });
+    completeTaskIn(tx, task, actor, { estOutputChars: 0 });
+    return { specArtifactId, imageArtifactIds };
+  });
+}
+
+export type Decision = "approved" | "rejected" | "revision_requested";
+
+/**
+ * 代表者の承認・却下・修正依頼(AC-16/17)。
+ * **呼び出し元はNext.js UI/APIのみ**(company CLIからは実行不可 — P1指摘1でCLIのdecideコマンドを削除済み)。
+ * - actorにデフォルトはない。UI層が明示的に "owner" を渡す
+ * - approvals(append-only)+audit_logに必ず記録
+ * - 却下・修正依頼は理由必須
+ * - 承認時は最終防御として最新QA(pass)と最新成果物の整合性を再検証する
+ * - 修正依頼は琴葉の修正タスクを自動生成し、投稿をdraftingへ戻す
+ */
+export function decidePost(
+  db: Db,
+  postId: string,
+  decision: Decision,
+  comment: string | null,
+  actor: string,
+): { approvalId: string; revisionTaskId?: string } {
+  if ((decision === "rejected" || decision === "revision_requested") && !comment?.trim()) {
+    throw new Error("却下・修正依頼には理由(コメント)が必要です");
+  }
+  return db.transaction((tx) => {
+    const post = getPostOrThrow(tx, postId);
+    if (post.status !== "awaiting_approval") {
+      throw new Error(`承認待ちでない投稿には判断できません(現在: ${post.status})`);
+    }
+    if (decision === "approved") {
+      // 最終防御: 承認時点でも最新copy⇄画像の連鎖と最新QA合格を再確認(P1指摘2)
+      assertPostContentIntegrity(tx, postId);
+      const latestQa = tx
+        .select()
+        .from(t.qaReviews)
+        .where(eq(t.qaReviews.postId, postId))
+        .orderBy(desc(t.qaReviews.createdAt))
+        .limit(1)
+        .get();
+      if (!latestQa || latestQa.result !== "pass") {
+        throw new Error(`整合性エラー: 最新のQA結果が合格ではありません(${latestQa?.result ?? "QAなし"})`);
+      }
+    }
+    const approvalId = ulid();
+    tx.insert(t.approvals)
+      .values({
+        id: approvalId,
+        subjectType: "post",
+        subjectId: postId,
+        decision,
+        comment: comment?.trim() || null,
+        decidedBy: actor,
+        decidedAt: nowIso(),
+      })
+      .run();
+    audit(tx, actor, decision === "approved" ? "approve" : decision === "rejected" ? "reject" : "revise", "post", postId, {
+      comment: comment?.slice(0, 200),
+    });
+
+    if (decision === "approved") {
+      setPostStatus(tx, post, "approved");
+      return { approvalId };
+    }
+    if (decision === "rejected") {
+      setPostStatus(tx, post, "rejected");
+      return { approvalId };
+    }
+    // 修正依頼: revision_requested → drafting + 修正タスク生成(AC-17)
+    setPostStatus(tx, post, "revision_requested");
+    const revCount = tx
+      .select({ n: sql<number>`count(*)` })
+      .from(t.approvals)
+      .where(and(eq(t.approvals.subjectId, postId), eq(t.approvals.decision, "revision_requested")))
+      .get();
+    const spec = taskSpecSchema.parse({
+      type: "write_copy",
+      title: `修正対応: ${post.title}`.slice(0, 120),
+      assigneeId: "emp_kotoha",
+      postId,
+      stepKey: `copy-rev${revCount?.n ?? 1}`,
+      priority: 3,
+      input: { revisionComment: comment?.slice(0, 500) },
+    });
+    const revisionTask = createTaskIn(tx, spec, todayLocal(), actor);
+    const afterRev = getPostOrThrow(tx, postId);
+    setPostStatus(tx, afterRev, "drafting");
+    return { approvalId, revisionTaskId: revisionTask.id };
+  });
+}
+
+export interface ApprovalQueueItem {
+  post: typeof t.posts.$inferSelect;
+  plan: Record<string, unknown> | null;
+  copy: Record<string, unknown> | null;
+  copyVersion: number | null;
+  qa: { result: string; checklist: unknown; issues: unknown; createdAt: string } | null;
+  imageArtifactIds: string[];
+  decisions: { decision: string; comment: string | null; decidedAt: string }[];
+}
+
+export function listApprovalQueue(db: Db): ApprovalQueueItem[] {
+  const posts = db.select().from(t.posts).where(eq(t.posts.status, "awaiting_approval")).orderBy(asc(t.posts.plannedDate)).all();
+  return posts.map((post) => {
+    const arts = db
+      .select()
+      .from(t.artifacts)
+      .where(eq(t.artifacts.postId, post.id))
+      .orderBy(desc(t.artifacts.version), desc(t.artifacts.createdAt))
+      .all();
+    const latestByKind = (kind: string) => arts.find((a) => a.kind === kind);
+    const copy = latestByKind("copy");
+    const plan = latestByKind("post_plan");
+    const latestImageVersion = arts.find((a) => a.kind === "image")?.version ?? null;
+    const images = latestImageVersion
+      ? arts.filter((a) => a.kind === "image" && a.version === latestImageVersion).sort((a, b) => (a.filePath ?? "").localeCompare(b.filePath ?? ""))
+      : [];
+    const qaRow = db.select().from(t.qaReviews).where(eq(t.qaReviews.postId, post.id)).orderBy(desc(t.qaReviews.createdAt)).limit(1).get();
+    const decisions = db
+      .select()
+      .from(t.approvals)
+      .where(and(eq(t.approvals.subjectType, "post"), eq(t.approvals.subjectId, post.id)))
+      .orderBy(desc(t.approvals.decidedAt))
+      .all();
+    return {
+      post,
+      plan: plan?.contentJson ? (JSON.parse(plan.contentJson) as Record<string, unknown>) : null,
+      copy: copy?.contentJson ? (JSON.parse(copy.contentJson) as Record<string, unknown>) : null,
+      copyVersion: copy?.version ?? null,
+      qa: qaRow
+        ? {
+            result: qaRow.result,
+            checklist: qaRow.checklistJson ? JSON.parse(qaRow.checklistJson) : [],
+            issues: qaRow.issuesJson ? JSON.parse(qaRow.issuesJson) : [],
+            createdAt: qaRow.createdAt,
+          }
+        : null,
+      imageArtifactIds: images.map((a) => a.id),
+      decisions: decisions.map((d) => ({ decision: d.decision, comment: d.comment, decidedAt: d.decidedAt })),
+    };
+  });
+}
+
+export function getArtifactFile(db: Db, artifactId: string): { filePath: string } | null {
+  const a = db.select().from(t.artifacts).where(eq(t.artifacts.id, artifactId)).get();
+  if (!a?.filePath) return null;
+  return { filePath: a.filePath };
+}
+
+/** 投稿の最新コンテンツ(plan+copy)。レンダラーが使用 */
+export function getPostContent(
+  db: Db,
+  postId: string,
+): {
+  post: typeof t.posts.$inferSelect;
+  plan: PostPlan | null;
+  copy: Copy | null;
+  copyVersion: number | null;
+  copyArtifactId: string | null;
+} {
+  const post = getPostOrThrow(db, postId);
+  const arts = db
+    .select()
+    .from(t.artifacts)
+    .where(eq(t.artifacts.postId, postId))
+    .orderBy(desc(t.artifacts.version), desc(t.artifacts.createdAt))
+    .all();
+  const planRow = arts.find((a) => a.kind === "post_plan");
+  const copyRow = arts.find((a) => a.kind === "copy");
+  return {
+    post,
+    plan: planRow?.contentJson ? postPlanArtifactSchema.parse(JSON.parse(planRow.contentJson)) : null,
+    copy: copyRow?.contentJson ? copyArtifactSchema.parse(JSON.parse(copyRow.contentJson)) : null,
+    copyVersion: copyRow?.version ?? null,
+    copyArtifactId: copyRow?.id ?? null,
+  };
 }
 
 // ---------- 表示状態(読み取り) ----------
