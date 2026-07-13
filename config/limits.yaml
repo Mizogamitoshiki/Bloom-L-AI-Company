@@ -1,0 +1,15 @@
+# 利用量・安全装置のしきい値(docs/14)
+daily:
+  max_generated_posts: 3
+  max_tasks: 20
+  max_heavy_escalations: 3
+  max_research_fetches: 15
+retry:
+  per_task: 2          # 超過でfailed(無制限再試行の禁止・確定§10)
+  replan_days: 2
+approval_queue:
+  soft_cap: 5          # 超過時は生成系をスキップ
+stale:
+  heartbeat_minutes: 10 # これを超えて無更新のrunningタスクは「状態不明」表示(docs/10)
+api:                   # API有効化時のみ(Q2: 代表者承認まで有効化しない)
+  monthly_budget_yen: 0

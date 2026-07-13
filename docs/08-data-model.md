@@ -153,6 +153,21 @@ erDiagram
 
 ### settings — key, value_json(投稿ペース、しきい値、通知設定、ブランドトークン参照等)
 
+### runs(日次run)【2026-07-13 V1実装時の追補 — docs/06「前回run異常終了の検出」の実現に必要】
+| 列 | 型 | 備考 |
+|---|---|---|
+| id | pk | |
+| run_date | text | YYYY-MM-DD |
+| started_at / finished_at | ts / ts? | finished_atがNULLのまま残ったrunは異常終了とみなし、次回run-startが回収する |
+| status | text | `running` / `done` / `aborted`(異常終了を検出し回収済み) |
+| note | text? | 回収メモ等 |
+
+### 参照整合性【2026-07-13 追補】
+- SQLiteは `foreign_keys=ON` とし、少なくとも以下に外部キーを定義する:
+  `employees.department_id→departments` / `tasks.assignee_id→employees` / `tasks.post_id→posts` / `task_events.task_id→tasks` / `artifacts.task_id→tasks` / `usage_records.task_id→tasks`
+- ユースケース層でも書き込み前に参照先の存在確認を行い、FK違反より先に理由の分かるエラーを返す
+- タスクの冪等キーは `run_date:type:assignee_id:post_id(なければ"-"):step_key(なければtitle先頭40文字)`。自動生成タスクは step_key を必ず明示する(同名別ステップ・別投稿の衝突防止)
+
 ## 3. 状態導出(リデューサ)
 
 ```

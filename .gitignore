@@ -1,0 +1,18 @@
+# 秘密情報・実データはコミットしない(docs/13)
+.env
+.env.*
+!.env.example
+
+# ローカルデータ・実行ログ
+data/
+runs/
+
+# 依存・ビルド
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# OS
+.DS_Store

@@ -1,0 +1,19 @@
+{
+  "_comment": "プレースホルダーパレット。Bloom-Lの正式ブランドカラー配置後にここを差し替える(docs/10)。",
+  "placeholder": true,
+  "colors": {
+    "primary": "#2f6f4f",
+    "primaryDark": "#1e4a34",
+    "accent": "#e8a13a",
+    "surface": "#f6f3ec",
+    "surfaceDark": "#efe9dd",
+    "ink": "#22281f",
+    "inkMuted": "#5c6357",
+    "danger": "#b3402f",
+    "warning": "#a86a00",
+    "info": "#2b5f8a",
+    "success": "#2f6f4f",
+    "floor": "#d8cdb4",
+    "wall": "#8a7d63"
+  }
+}

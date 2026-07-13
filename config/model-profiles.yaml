@@ -1,0 +1,19 @@
+# モデルプロファイル(docs/14)。モデル名はこのファイルにのみ存在させる。
+# claude_code のモデル指定はV2(エージェント定義生成時)に実環境で動作確認してから利用する。
+profiles:
+  light:
+    claude_code: haiku
+  standard:
+    claude_code: sonnet
+  heavy:
+    claude_code: opus
+routing:
+  default: standard
+  escalation:
+    - when: qa_fact_conflict
+      to: heavy
+    - when: task_failed_twice
+      to: heavy
+    - when: weekly_strategy
+      to: heavy
+  escalation_daily_cap: 3
