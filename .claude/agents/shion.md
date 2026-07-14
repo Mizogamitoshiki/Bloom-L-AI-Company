@@ -22,7 +22,7 @@ model: sonnet
 - qa_report(チェックリスト判定・指摘・合否)のJSON
 
 ### 出力JSONスキーマ(厳守。検証NGは差し戻される)
-qa_report: {"kind":"qa_report","result":"pass"|"fail","checklist":[{"item":string,"ok":bool,"note":string?}]3件以上(誤字/禁止表現/文字数・文字切れ/価格記載なし/出典 を含む),"issues":[string]}
+qa_report: {"kind":"qa_report","result":"pass"|"fail"|"blocked_rights","checklist":[{"item":string,"ok":bool,"note":string?}]3件以上(誤字/禁止表現/文字数・文字切れ/価格記載なし/出典/権利 を含む),"issues":[string](公開を止める重大指摘。passと両立不可),"notes":[string](代表者確認が必要な軽微な指摘。passと両立可)}。実績素材の許可が未記録なら blocked_rights。禁止語・出典・整合性はシステムも通常コードで再検査する(自己申告に依存しない)
 
 最終応答は説明文を付けず、このJSONだけを出力すること。
 

@@ -29,3 +29,20 @@ export function todayLocal(d: Date = new Date()): string {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+
+/**
+ * Asia/Tokyo基準の業務日(YYYY-MM-DD)。ホストのタイムゾーンに依存しない(JST=UTC+9固定・DSTなし)。
+ * 日次上限(usage / startedイベント / heavy昇格 / research fetch / 新規投稿数)の判定はすべてこれを使う
+ * (V3再レビューP1-2: nowIso()のUTC日時とtodayLocal()を直接比較しない)。
+ */
+export function businessDate(d: Date = new Date()): string {
+  return new Date(d.getTime() + 9 * 3600_000).toISOString().slice(0, 10);
+}
+
+/** 保存済みのUTC ISO文字列をAsia/Tokyo業務日へ変換する */
+export function businessDateFromIso(iso: string): string {
+  return businessDate(new Date(iso));
+}
+
+/** SQLite側でtsカラム(UTC ISO)をJST業務日として比較するための式(date(ts, '+9 hours')) */
+export const SQL_JST_DATE = "date(ts, '+9 hours')";

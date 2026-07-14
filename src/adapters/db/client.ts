@@ -11,6 +11,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import * as schema from "./schema";
 import { findRepoRoot } from "../root";
+import { runMigrations } from "./migrations";
 
 export type Db = BetterSQLite3Database<typeof schema>;
 
@@ -111,9 +112,20 @@ export interface OpenedDb {
 export function openDb(dbPath: string = process.env.BLOOM_DB_PATH ?? defaultDbPath()): OpenedDb {
   mkdirSync(path.dirname(dbPath), { recursive: true });
   const sqlite = new Database(dbPath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  sqlite.exec(DDL);
-  const db = drizzle(sqlite, { schema });
-  return { db, sqlite };
+  try {
+    sqlite.pragma("journal_mode = WAL");
+    sqlite.pragma("foreign_keys = ON");
+    sqlite.exec(DDL);
+    // バージョン付きマイグレーション(schema_migrations管理・全体トランザクション・部分適用なし)
+    runMigrations(sqlite);
+    const db = drizzle(sqlite, { schema });
+    return { db, sqlite };
+  } catch (err) {
+    // 初期化・migration失敗時は接続を確実に閉じてから再throwする(P2)
+    sqlite.close();
+    throw err;
+  }
 }
+
+/** テスト用: V2形状のDB(マイグレーション未適用)を作る素のDDL */
+export const BASE_DDL = DDL;

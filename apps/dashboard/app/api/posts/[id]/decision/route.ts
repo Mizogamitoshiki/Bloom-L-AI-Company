@@ -27,9 +27,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       sqlite.close();
     }
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "操作に失敗しました" },
-      { status: 400 },
-    );
+    // V3-J: Zod生エラー等を代表者向けの日本語メッセージへ変換して返す
+    const { toFriendlyMessage } = await import("@/lib/errors");
+    return NextResponse.json({ error: toFriendlyMessage(err) }, { status: 400 });
   }
 }

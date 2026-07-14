@@ -6,14 +6,19 @@
  * - リトライ上限・冪等性・状態遷移ガード・参照存在確認をここで強制
  * - 複数書き込みを伴う操作は1トランザクション(途中失敗で全ロールバック)
  */
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import nodePath from "node:path";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { RunResult } from "better-sqlite3";
 import type { Db } from "./client";
 import * as t from "./schema";
 import * as schema from "./schema";
-import { ulid, nowIso, todayLocal } from "../../core/ids";
+import { ulid, nowIso, todayLocal, businessDate } from "../../core/ids";
+import { findRepoRoot } from "../root";
+
+/** SQLite: tsカラム(UTC ISO)をAsia/Tokyo業務日で比較する(P1-2) */
+const jstDateOfTs = sql<string>`date(ts, '+9 hours')`;
 import {
   eventPayloadSchema,
   taskSpecSchema,
@@ -23,6 +28,13 @@ import {
   qaReportArtifactSchema,
   postPlanArtifactSchema,
   copyArtifactSchema,
+  newsCopyArtifactSchema,
+  portfolioCopyArtifactSchema,
+  sourceInputSchema,
+  permissionScopeSchema,
+  SCOPE_NONE,
+  type PermissionScope,
+  TEMPLATE_IDS,
   SCHEMA_VERSION,
   type EventPayload,
   type TaskSpec,
@@ -30,7 +42,25 @@ import {
   type QaReport,
   type PostPlan,
   type Copy,
+  type NewsCopy,
+  type PortfolioCopy,
+  type SourceInput,
+  type TemplateId,
 } from "../../core/schemas";
+import { z } from "zod";
+import { templateFor } from "../../core/templates/index";
+import {
+  collectPublicText,
+  scanForbidden,
+  containsLatestPhrase,
+  matchesSourceRequiredPattern,
+} from "../../core/guards";
+import { loadForbiddenPhrases, loadQaRules } from "../config";
+import { normalizeHttpUrl, assertSafeHttpUrl } from "../../core/urls";
+
+/** 3種のコピー成果物を判別して検証する */
+const anyCopySchema = z.union([copyArtifactSchema, newsCopyArtifactSchema, portfolioCopyArtifactSchema]);
+export type AnyCopy = Copy | NewsCopy | PortfolioCopy;
 import {
   type TaskEventType,
   type TaskStatus,
@@ -220,6 +250,27 @@ function createTaskIn(conn: DbConn, specInput: TaskSpec, runDate: string, actor 
 export function createTask(db: Db, specInput: TaskSpec, runDate: string, actor = "system"): CreateTaskResult {
   const spec = taskSpecSchema.parse(specInput);
   const key = buildIdempotencyKey(spec, runDate);
+
+  // V3-H: 生成系タスクは停止中に作成不可。推定利用量の上限超過で自動停止。
+  // 自動停止はタスク作成トランザクションの外で永続化する(ロールバックで消えないように)。
+  // 注: 修正依頼(decidePost内のcreateTaskIn)は代表者操作のためこのガードを通らない。
+  if (GENERATION_TASK_TYPES.has(spec.type)) {
+    const paused = getGenerationPause(db);
+    if (paused) {
+      throw new Error(`新規生成は停止中です(理由: ${paused.reason})。代表者がダッシュボードから再開してください`);
+    }
+    const limits = loadLimits();
+    const usageToday = db
+      .select({ n: sql<number>`coalesce(sum(est_output_chars),0)` })
+      .from(t.usageRecords)
+      .where(sql`${jstDateOfTs} = ${businessDate()}`)
+      .get();
+    if ((usageToday?.n ?? 0) >= limits.daily.max_est_output_chars) {
+      db.transaction((tx) => pauseGeneration(tx, `推定利用量が日次上限に到達(${usageToday?.n}字 / 上限${limits.daily.max_est_output_chars}字)`, actor));
+      throw new Error(`推定利用量の上限に達したため生成を停止しました(本日${usageToday?.n}字)。代表者の再開判断が必要です`);
+    }
+  }
+
   return db.transaction((tx): CreateTaskResult => {
     const existing = tx.select().from(t.tasks).where(eq(t.tasks.idempotencyKey, key)).get();
     if (existing) return { task: existing, created: false };
@@ -246,8 +297,43 @@ function setTaskStatus(
 export function startTask(db: Db, taskId: string, actor: string): void {
   db.transaction((tx) => {
     const task = getTaskOrThrow(tx, taskId);
+    // V3-H: エージェント起動(startedイベント)の日次上限(境界は>=)
+    const limits = loadLimits();
+    const startedToday = tx
+      .select({ n: sql<number>`count(*)` })
+      .from(t.taskEvents)
+      .where(and(eq(t.taskEvents.type, "started"), sql`${jstDateOfTs} = ${businessDate()}`))
+      .get();
+    if ((startedToday?.n ?? 0) >= limits.daily.max_agent_launches) {
+      throw new Error(
+        `本日のエージェント起動上限(${limits.daily.max_agent_launches}回)に達しています(docs/14)。残タスクは翌日に持ち越してください`,
+      );
+    }
     setTaskStatus(tx, task, "running", { startedAt: nowIso(), finishedAt: null });
     appendEvent(tx, taskId, "started", actor);
+  });
+}
+
+/**
+ * heavyモデルへの昇格記録(V3-H)。日次上限(max_heavy_escalations)を超える昇格は拒否する(境界は>=)。
+ * オーケストレーターは昇格前にこれをCLI経由で呼び、拒否されたらstandardのまま実行する。
+ */
+export function recordHeavyEscalation(db: Db, taskId: string, reason: string, actor: string): { countToday: number } {
+  return db.transaction((tx) => {
+    getTaskOrThrow(tx, taskId);
+    const limits = loadLimits();
+    const usedToday = tx
+      .select({ n: sql<number>`count(*)` })
+      .from(t.auditLog)
+      .where(and(eq(t.auditLog.action, "heavy_escalation"), sql`${jstDateOfTs} = ${businessDate()}`))
+      .get();
+    if ((usedToday?.n ?? 0) >= limits.daily.max_heavy_escalations) {
+      throw new Error(
+        `本日のheavyモデル昇格上限(${limits.daily.max_heavy_escalations}回)に達しています(docs/14)。standardのまま実行してください`,
+      );
+    }
+    audit(tx, actor, "heavy_escalation", "task", taskId, { reason: reason.slice(0, 200) });
+    return { countToday: (usedToday?.n ?? 0) + 1 };
   });
 }
 
@@ -311,6 +397,7 @@ function completeTaskIn(
   setTaskStatus(conn, task, "done", { finishedAt: nowIso(), error: null });
   appendEvent(conn, task.id, "succeeded", actor);
   const started = task.startedAt ? new Date(task.startedAt).getTime() : Date.now();
+  const ts = nowIso();
   conn
     .insert(t.usageRecords)
     .values({
@@ -320,9 +407,26 @@ function completeTaskIn(
       estInputChars: opts.estInputChars ?? 0,
       estOutputChars: opts.estOutputChars ?? 0,
       wallSeconds: Math.max(0, Math.round((Date.now() - started) / 1000)),
-      ts: nowIso(),
+      ts,
     })
     .run();
+  // V3-H(レビュー指摘2): usage_records追加直後に日次合計を再集計し、
+  // 上限到達・超過(>=)なら同じ成功トランザクション内で停止を保存する。
+  // これにより「その日最後の生成タスクで超過」しても停止状態が確実に残り、
+  // 翌日以降も代表者が再開するまで維持される(Maxプラン枠内の推定量であり、API課金の発生ではない)。
+  const limits = loadLimits();
+  const usageToday = conn
+    .select({ n: sql<number>`coalesce(sum(est_output_chars),0)` })
+    .from(t.usageRecords)
+    .where(sql`${jstDateOfTs} = ${businessDate(new Date(ts))}`)
+    .get();
+  if ((usageToday?.n ?? 0) >= limits.daily.max_est_output_chars && !getGenerationPause(conn)) {
+    pauseGeneration(
+      conn,
+      `推定利用量が日次上限に到達(${usageToday?.n}字 / 上限${limits.daily.max_est_output_chars}字)`,
+      actor,
+    );
+  }
 }
 
 /** 成果物提出 → 検証OKならタスク完了+利用量記録(全体で1トランザクション) */
@@ -526,10 +630,49 @@ export interface CreatePostInput {
   format: string;
   title: string;
   plannedDate?: string;
+  templateId?: TemplateId;
+  portfolioItemId?: string;
 }
 
 export function createPost(db: Db, input: CreatePostInput, actor = "system"): typeof t.posts.$inferSelect {
+  const templateId = input.templateId ?? "tpl-howto";
+  if (!TEMPLATE_IDS.includes(templateId)) throw new Error(`不明なテンプレートID: ${templateId}`);
+  // V3-H: 生成上限・停止状態のガード。
+  // 注意: 自動停止(pauseGeneration)は投稿作成トランザクションの外で永続化する
+  // (同一トランザクション内で停止→throwすると、ロールバックで停止設定まで消えるため)
+  const paused = getGenerationPause(db);
+  if (paused) {
+    throw new Error(`新規生成は停止中です(理由: ${paused.reason})。代表者がダッシュボードから再開してください`);
+  }
+  const limits = loadLimits();
+  const awaiting = db
+    .select({ n: sql<number>`count(*)` })
+    .from(t.posts)
+    .where(eq(t.posts.status, "awaiting_approval"))
+    .get();
+  if ((awaiting?.n ?? 0) >= limits.approval_queue.soft_cap) {
+    db.transaction((tx) => pauseGeneration(tx, `承認待ちが${awaiting?.n}件(上限${limits.approval_queue.soft_cap})に達したため`, actor));
+    throw new Error(
+      `承認待ちが${awaiting?.n}件あるため新規生成を停止しました。先に承認キューを処理してください(処理後に代表者が再開)`,
+    );
+  }
+  const today = businessDate();
+  const createdToday = db
+    .select({ n: sql<number>`count(*)` })
+    .from(t.posts)
+    .where(eq(t.posts.createdAt, today))
+    .get();
+  if ((createdToday?.n ?? 0) >= limits.daily.max_generated_posts) {
+    throw new Error(`本日の新規投稿上限(${limits.daily.max_generated_posts}本)に達しています(docs/14。通常運用は1本)`);
+  }
+
   return db.transaction((tx) => {
+    if (templateId === "tpl-portfolio") {
+      if (!input.portfolioItemId) throw new Error("tpl-portfolioにはportfolioItemIdが必要です");
+      const item = tx.select().from(t.portfolioItems).where(eq(t.portfolioItems.id, input.portfolioItemId)).get();
+      if (!item) throw new Error(`実績が見つかりません: ${input.portfolioItemId}`);
+    }
+
     const id = ulid();
     tx.insert(t.posts)
       .values({
@@ -541,10 +684,24 @@ export function createPost(db: Db, input: CreatePostInput, actor = "system"): ty
         plannedDate: input.plannedDate ?? null,
         publishMethod: "manual",
         rightsState: "n/a",
+        templateId,
+        portfolioItemId: input.portfolioItemId ?? null,
+        createdAt: today,
       })
       .run();
-    audit(tx, actor, "post_create", "post", id, { title: input.title, pillar: input.pillar });
+    audit(tx, actor, "post_create", "post", id, { title: input.title, pillar: input.pillar, templateId });
     return tx.select().from(t.posts).where(eq(t.posts.id, id)).get()!;
+  });
+}
+
+/** 予定日の変更(V3-F)。監査ログへ記録。自動投稿・予約投稿は行わない */
+export function reschedulePost(db: Db, postId: string, plannedDate: string, actor: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(plannedDate)) throw new Error("日付はYYYY-MM-DD形式で指定してください");
+  db.transaction((tx) => {
+    const post = getPostOrThrow(tx, postId);
+    const prev = post.plannedDate;
+    tx.update(t.posts).set({ plannedDate }).where(eq(t.posts.id, postId)).run();
+    audit(tx, actor, "post_reschedule", "post", postId, { from: prev, to: plannedDate });
   });
 }
 
@@ -558,7 +715,11 @@ export function assertPostContentIntegrity(conn: DbConn, postId: string): {
   copyArtifactId: string;
   specArtifactId: string;
   imageArtifactIds: string[];
+  spec: CarouselSpec;
+  copy: AnyCopy;
 } {
+  const post = getPostOrThrow(conn, postId);
+  const copyKind = templateFor(post.templateId).copyKind;
   const arts = conn
     .select()
     .from(t.artifacts)
@@ -567,14 +728,24 @@ export function assertPostContentIntegrity(conn: DbConn, postId: string): {
     .all();
   const plan = arts.find((a) => a.kind === "post_plan");
   if (!plan) throw new Error("整合性エラー: 最新のpost_plan成果物がありません");
-  const copy = arts.find((a) => a.kind === "copy");
-  if (!copy) throw new Error("整合性エラー: 最新のcopy成果物がありません");
+  const copy = arts.find((a) => a.kind === copyKind);
+  if (!copy?.contentJson) throw new Error(`整合性エラー: 最新の${copyKind}成果物がありません`);
   const spec = arts.find((a) => a.kind === "carousel_spec");
   if (!spec?.contentJson) throw new Error("整合性エラー: carousel_specがありません(未レンダリング)");
-  const specContent = carouselSpecSchema.parse(JSON.parse(spec.contentJson));
+  let specContent: CarouselSpec;
+  let copyContent: AnyCopy;
+  try {
+    specContent = carouselSpecSchema.parse(JSON.parse(spec.contentJson));
+    copyContent = anyCopySchema.parse(JSON.parse(copy.contentJson));
+  } catch {
+    // 旧形式(sourceCopyArtifactIdなし等)をZod生エラーのまま外へ出さない(V3-J)
+    throw new Error(
+      `整合性エラー: カルーセル情報が旧形式または不正です。再レンダリングしてください(pnpm company render --post ${postId})`,
+    );
+  }
   if (specContent.sourceCopyArtifactId !== copy.id) {
     throw new Error(
-      `整合性エラー: 最新copy(v${copy.version})から生成された画像がありません(現在の画像はcopy ${specContent.sourceCopyArtifactId} 由来)。再レンダリングが必要です`,
+      `整合性エラー: 最新${copyKind}(v${copy.version})から生成された画像がありません(現在の画像は${copyKind} ${specContent.sourceCopyArtifactId} 由来)。再レンダリングが必要です`,
     );
   }
   const images = arts.filter((a) => {
@@ -585,7 +756,7 @@ export function assertPostContentIntegrity(conn: DbConn, postId: string): {
       return false;
     }
   });
-  const expected = specContent.slides.pages.length + 2;
+  const expected = templateFor(specContent.templateId).expectedPages(specContent);
   if (images.length !== expected) {
     throw new Error(`整合性エラー: 画像枚数が不一致(${images.length}枚 / 期待${expected}枚)`);
   }
@@ -594,8 +765,385 @@ export function assertPostContentIntegrity(conn: DbConn, postId: string): {
       throw new Error(`整合性エラー: 画像ファイルが存在しません(${img.filePath ?? img.id})`);
     }
   }
-  return { copyArtifactId: copy.id, specArtifactId: spec.id, imageArtifactIds: images.map((a) => a.id) };
+  return {
+    copyArtifactId: copy.id,
+    specArtifactId: spec.id,
+    imageArtifactIds: images.map((a) => a.id),
+    spec: specContent,
+    copy: copyContent,
+  };
 }
+
+// ---------- V3: 情報源(sources)・権利(portfolio/permissions)・上限 ----------
+
+export interface LinkedSource {
+  id: string;
+  title: string;
+  url: string;
+  publisher: string;
+  publishedAt: string;
+  checkedAt: string;
+  usable: boolean;
+  verificationStatus: string;
+  factOrInference: string;
+}
+
+export function getLinkedSources(conn: DbConn, postId: string): LinkedSource[] {
+  const rows = conn
+    .select({
+      id: t.sources.id,
+      title: t.sources.title,
+      url: t.sources.url,
+      publisher: t.sources.publisher,
+      publishedAt: t.sources.publishedAt,
+      checkedAt: t.sources.checkedAt,
+      usable: t.sources.usable,
+      verificationStatus: t.sources.verificationStatus,
+      factOrInference: t.sources.factOrInference,
+    })
+    .from(t.postSources)
+    .innerJoin(t.sources, eq(t.postSources.sourceId, t.sources.id))
+    .where(eq(t.postSources.postId, postId))
+    .all();
+  return rows.map((r) => ({ ...r, usable: r.usable === 1 }));
+}
+
+/**
+ * source登録(V3-B)。URLはhttp/httpsのみ+正規化して重複防止。
+ * 日次のリサーチ取得上限(max_research_fetches)に到達している場合は登録できない(境界は>=)。
+ */
+export function addSource(db: Db, input: SourceInput, actor: string): { id: string; created: boolean } {
+  const parsed = sourceInputSchema.parse(input);
+  parsed.url = normalizeHttpUrl(parsed.url, "source URL");
+  return db.transaction((tx) => {
+    const existing = tx.select().from(t.sources).where(eq(t.sources.url, parsed.url)).get();
+    if (existing) return { id: existing.id, created: false };
+
+    const limits = loadLimits();
+    const today = businessDate();
+    const fetchedToday = tx
+      .select({ n: sql<number>`count(*)` })
+      .from(t.sources)
+      .where(eq(t.sources.checkedAt, today))
+      .get();
+    if ((fetchedToday?.n ?? 0) >= limits.daily.max_research_fetches) {
+      throw new Error(
+        `本日のリサーチ取得上限(${limits.daily.max_research_fetches}件)に達しています(docs/14)。明日以降に登録するか、代表者にlimits.yamlの見直しを相談してください`,
+      );
+    }
+    const unverified = !parsed.fetched || !parsed.publishedAt;
+    const id = ulid();
+    tx.insert(t.sources)
+      .values({
+        id,
+        title: parsed.title,
+        url: parsed.url,
+        publisher: parsed.publisher,
+        publishedAt: parsed.publishedAt ?? "",
+        checkedAt: businessDate(),
+        isPrimary: parsed.isPrimary ? 1 : 0,
+        reliability: parsed.reliability,
+        summary: parsed.summary,
+        factOrInference: parsed.factOrInference,
+        fetchedAt: parsed.fetched ? nowIso() : null,
+        usable: unverified ? 0 : 1,
+        verificationStatus: unverified ? "unconfirmed" : "confirmed",
+      })
+      .run();
+    audit(tx, actor, "source_add", "source", id, { url: parsed.url, unverified });
+    return { id, created: true };
+  });
+}
+
+export function linkSourceToPost(db: Db, postId: string, sourceId: string, actor: string): { created: boolean } {
+  return db.transaction((tx) => {
+    getPostOrThrow(tx, postId);
+    const src = tx.select().from(t.sources).where(eq(t.sources.id, sourceId)).get();
+    if (!src) throw new Error(`sourceが見つかりません: ${sourceId}`);
+    const existing = tx
+      .select()
+      .from(t.postSources)
+      .where(and(eq(t.postSources.postId, postId), eq(t.postSources.sourceId, sourceId)))
+      .get();
+    if (existing) return { created: false };
+    tx.insert(t.postSources).values({ postId, sourceId, citedAs: null }).run();
+    audit(tx, actor, "source_link", "post", postId, { sourceId });
+    return { created: true };
+  });
+}
+
+export interface RightsCheck {
+  allowed: boolean;
+  mode: "customer" | "anonymous" | null;
+  displayName: string | null;
+  reason: string | null;
+  /** 項目別の利用可否(V3レビュー指摘1: scope_jsonをZodで解析し個別判定) */
+  allowedUses: PermissionScope;
+}
+
+const NO_USES: PermissionScope = { ...SCOPE_NONE };
+
+/** scope_jsonの安全な解析。不正・欠落は全不許可として扱う */
+export function parsePermissionScope(scopeJson: string | null): PermissionScope {
+  if (!scopeJson) return { ...NO_USES };
+  try {
+    return permissionScopeSchema.parse(JSON.parse(scopeJson));
+  } catch {
+    return { ...NO_USES };
+  }
+}
+
+export const EVIDENCE_DIR = "07_customer-permissions";
+
+/**
+ * 許可証跡パスの検証(V3再レビューP1-3)。任意文字列を信用しない。
+ * - data/workspace/07_customer-permissions/ 配下の安全な相対パスのみ
+ * - 絶対パス・「..」・フォルダ外参照・存在しないファイル・ディレクトリを拒否
+ * - approved / anonymousAllowed の判定時にも通常ファイルの実在を確認する
+ */
+export function evidenceFileStatus(rel: string | null | undefined): { ok: boolean; reason: string | null } {
+  const raw = rel?.trim();
+  if (!raw) return { ok: false, reason: "証跡(evidencePath)が未登録です" };
+  const p = raw.replaceAll("\\", "/");
+  if (nodePath.isAbsolute(p) || /^[a-zA-Z]:/.test(p)) {
+    return { ok: false, reason: "証跡パスに絶対パスは使用できません(07_customer-permissions/ からの相対パスのみ)" };
+  }
+  if (p.split("/").includes("..")) {
+    return { ok: false, reason: "証跡パスに「..」は使用できません" };
+  }
+  if (!p.startsWith(`${EVIDENCE_DIR}/`)) {
+    return { ok: false, reason: `証跡は data/workspace/${EVIDENCE_DIR}/ 配下のみ許可されます(例: ${EVIDENCE_DIR}/顧客名-同意DM.png)` };
+  }
+  const workspace = nodePath.join(findRepoRoot(), "data", "workspace");
+  const abs = nodePath.resolve(workspace, p);
+  const dir = nodePath.resolve(workspace, EVIDENCE_DIR) + nodePath.sep;
+  if (!abs.startsWith(dir)) {
+    return { ok: false, reason: "証跡パスが許可フォルダの外を参照しています" };
+  }
+  try {
+    const st = statSync(abs);
+    if (!st.isFile()) return { ok: false, reason: `証跡がファイルではありません(${p})` };
+  } catch {
+    return { ok: false, reason: `証跡ファイルが存在しません(${p})。先に07_customer-permissions/へ保存してください` };
+  }
+  return { ok: true, reason: null };
+}
+
+/**
+ * 実績素材の公開可否(V3-C)。通常コードで判定し、AIプロンプトへ渡す前にも使用する。
+ * - approvedでも scope.name=false なら実名は使えない(匿名許可+匿名名があれば匿名で利用)
+ * - 匿名利用は anonymousAllowed=true かつ 証跡(evidencePath)がある場合のみ
+ * - rejected / revoked / 期限切れは全利用不可
+ */
+export function checkPortfolioRights(conn: DbConn, portfolioItemId: string): RightsCheck {
+  const deny = (reason: string): RightsCheck => ({ allowed: false, mode: null, displayName: null, reason, allowedUses: { ...NO_USES } });
+  const item = conn.select().from(t.portfolioItems).where(eq(t.portfolioItems.id, portfolioItemId)).get();
+  if (!item) return deny("実績が見つかりません");
+  const perm = item.permissionId
+    ? conn.select().from(t.customerPermissions).where(eq(t.customerPermissions.id, item.permissionId)).get()
+    : undefined;
+  if (!perm) return deny("公開許可レコードがありません(実績画面で許可を記録してください)");
+  if (perm.status === "rejected" || perm.status === "revoked") {
+    return deny(`公開許可がありません(状態: ${perm.status})`);
+  }
+  if (perm.expiresAt && perm.expiresAt < businessDate()) {
+    return deny(`公開許可の期限が切れています(${perm.expiresAt})`);
+  }
+
+  // 証跡は「記録されている」だけでなく、実在する通常ファイルであることを判定時にも確認する(P1-3)
+  const evidence = evidenceFileStatus(perm.evidencePath);
+  const anonymousOk = perm.anonymousAllowed === 1 && !!item.anonymousName && evidence.ok;
+
+  if (perm.status === "approved") {
+    if (!evidence.ok) {
+      return deny(`承認済みですが証跡が確認できません: ${evidence.reason}`);
+    }
+    const scope = parsePermissionScope(perm.scopeJson);
+    if (scope.name) {
+      return { allowed: true, mode: "customer", displayName: item.customerName, reason: null, allowedUses: scope };
+    }
+    if (anonymousOk) {
+      // 実名は不可だが匿名で利用可。実名系のname/urlは不許可のまま項目別scopeに従う
+      return { allowed: true, mode: "anonymous", displayName: item.anonymousName!, reason: null, allowedUses: { ...scope, name: false } };
+    }
+    return deny("許可範囲に実名(name)が含まれず、匿名利用も許可されていません(scope設定または匿名許可+証跡が必要)");
+  }
+  // pending
+  if (anonymousOk) {
+    return { allowed: true, mode: "anonymous", displayName: item.anonymousName!, reason: null, allowedUses: { ...NO_USES } };
+  }
+  if (perm.anonymousAllowed === 1 && !evidence.ok) {
+    return deny(`匿名利用の許可にも証跡の確認が必要です: ${evidence.reason}`);
+  }
+  return deny("公開許可が未取得(pending)です。匿名利用も許可されていないため使用できません");
+}
+
+interface CustomerDataViolation {
+  item: string;
+  kind: "name" | "url" | "testimonial";
+  detail: string;
+}
+
+/**
+ * 許可範囲外の顧客データ(実名・URL・お客様の声)が公開テキストに含まれていないかの通常コード検査。
+ * AI入力へ渡す前の検査(listPortfolioForAi)と対になる出口側の防御。
+ */
+function findCustomerDataViolations(conn: DbConn, text: string): CustomerDataViolation[] {
+  const violations: CustomerDataViolation[] = [];
+  const items = conn.select().from(t.portfolioItems).all();
+  for (const item of items) {
+    const rc = checkPortfolioRights(conn, item.id);
+    const name = item.customerName.trim();
+    if (name.length >= 2 && text.includes(name) && !(rc.mode === "customer" && rc.allowedUses.name)) {
+      violations.push({ item: item.id, kind: "name", detail: `顧客名「${name}」(許可範囲外)` });
+    }
+    const siteUrl = item.siteUrl?.trim();
+    if (siteUrl && siteUrl.length >= 10 && text.includes(siteUrl) && !rc.allowedUses.url) {
+      violations.push({ item: item.id, kind: "url", detail: `顧客URL(scope.url未許可)` });
+    }
+    const testimonial = item.testimonial?.trim();
+    if (testimonial && testimonial.length >= 10 && text.includes(testimonial) && !rc.allowedUses.testimonial) {
+      violations.push({ item: item.id, kind: "testimonial", detail: "お客様の声(scope.testimonial未許可)" });
+    }
+  }
+  return violations;
+}
+
+/**
+ * AIプロンプトへ渡してよい形に許可範囲でマスクした実績ビュー(V3レビュー指摘1)。
+ * CLIのportfolio-list(オーケストレーター向け)はこれを返す。UI(代表者)向けはlistPortfolioを使う。
+ */
+export interface PortfolioAiView {
+  id: string;
+  displayName: string | null; // 許可された表示名(なければnull=利用不可)
+  usable: boolean;
+  reason: string | null;
+  allowedUses: PermissionScope;
+  siteUrl: string | null; // scope.url=trueの場合のみ
+  testimonial: string | null; // scope.testimonial=trueの場合のみ
+  assetsPath: string | null; // scope.screenshot=trueの場合のみ(レンダラー・AIへ渡してよい素材)
+  summary: string | null;
+  problem: string | null;
+  technologies: string[];
+}
+
+export function listPortfolioForAi(db: Db): PortfolioAiView[] {
+  const items = db.select().from(t.portfolioItems).orderBy(desc(t.portfolioItems.createdAt)).all();
+  return items.map((item): PortfolioAiView => {
+    const rc = checkPortfolioRights(db, item.id);
+    // P1-1: 利用不可(pending/rejected/revoked/期限切れ/不正scope/証跡なし)の実績は
+    // 顧客由来情報を一切返さない(存在と不可理由のみ)。
+    if (!rc.allowed) {
+      return {
+        id: item.id,
+        displayName: null,
+        usable: false,
+        reason: rc.reason,
+        allowedUses: { ...SCOPE_NONE },
+        siteUrl: null,
+        testimonial: null,
+        assetsPath: null,
+        summary: null,
+        problem: null,
+        technologies: [],
+      };
+    }
+    // 利用可能な場合のみ、許可された範囲の情報を返す(匿名モードでは匿名名+非特定情報)
+    return {
+      id: item.id,
+      displayName: rc.displayName,
+      usable: true,
+      reason: null,
+      allowedUses: rc.allowedUses,
+      siteUrl: rc.allowedUses.url ? (item.siteUrl ?? null) : null,
+      testimonial: rc.allowedUses.testimonial ? (item.testimonial ?? null) : null,
+      assetsPath: rc.allowedUses.screenshot ? (item.assetsPath ?? null) : null,
+      summary: item.summary ?? null,
+      problem: item.problem ?? null,
+      technologies: item.technologiesJson ? (JSON.parse(item.technologiesJson) as string[]) : [],
+    };
+  });
+}
+
+/** 公開テキストの通常コード検査(禁止語・顧客名漏えい・source要求)。QA提出時と承認時の両方で使う */
+function assertPublicTextSafety(conn: DbConn, post: typeof t.posts.$inferSelect, copy: AnyCopy): void {
+  const text = collectPublicText(copy);
+  const forbidden = scanForbidden(text, loadForbiddenPhrases());
+  if (forbidden.length > 0) {
+    throw new Error(
+      `禁止表現を検出: ${forbidden.map((h) => `${h.label}「${h.sample}」`).join(" / ")}(config/forbidden-phrases.yaml)`,
+    );
+  }
+  const violations = findCustomerDataViolations(conn, text);
+  if (violations.length > 0) {
+    throw new Error(
+      `公開許可のない顧客名がテキストに含まれています / 許可範囲外の顧客データ: ${violations.map((v) => v.detail).join(", ")}(実績画面で許可範囲を記録してください)`,
+    );
+  }
+  const rules = loadQaRules();
+  const linked = getLinkedSources(conn, post.id);
+  const usableConfirmed = linked.filter((s) => s.usable && s.verificationStatus === "confirmed");
+  if (rules.require_sources_for_pillars.includes(post.pillar) && usableConfirmed.length === 0) {
+    throw new Error("ニュース系投稿は確認済みsourceの紐付けが必須です(company source-add → source-link)");
+  }
+  const latestPhrase = containsLatestPhrase(text, rules);
+  if (latestPhrase && !linked.some((s) => s.publishedAt && s.checkedAt)) {
+    throw new Error(`「${latestPhrase}」は公開日と確認日の揃ったsourceがある場合のみ使用できます`);
+  }
+  const claimPattern = matchesSourceRequiredPattern(text, rules);
+  if (claimPattern && usableConfirmed.length < rules.min_sources_for_strong_claims) {
+    throw new Error(
+      `統計・調査系の主張には確認済みsourceが${rules.min_sources_for_strong_claims}件以上必要です(現在${usableConfirmed.length}件。単一情報源で断定しない)`,
+    );
+  }
+}
+
+/** 実績投稿の権利+spec表示名の再検証(QA時・承認時共通) */
+function assertPortfolioRightsForPost(
+  conn: DbConn,
+  post: typeof t.posts.$inferSelect,
+  spec: CarouselSpec | null,
+): void {
+  if (!post.portfolioItemId) return;
+  const rc = checkPortfolioRights(conn, post.portfolioItemId);
+  if (!rc.allowed) {
+    throw new Error(`権利確認が未了です: ${rc.reason} — QAは result="blocked_rights" で提出してください`);
+  }
+  if (spec && spec.templateId === "tpl-portfolio") {
+    const expectAnonymous = rc.mode === "anonymous";
+    if (spec.anonymous !== expectAnonymous || spec.displayName !== rc.displayName) {
+      throw new Error(
+        `表示名が現在の許可状態と一致しません(画像: ${spec.displayName}${spec.anonymous ? "・匿名" : ""} / 許可: ${rc.displayName}${expectAnonymous ? "・匿名" : ""})。再レンダリングしてください`,
+      );
+    }
+  }
+}
+
+/** 生成の一時停止(V3-H)。代表者がUIから明示的に再開するまで解除しない */
+export interface GenerationPause {
+  reason: string;
+  pausedAt: string;
+  pausedBy: string;
+}
+
+export function getGenerationPause(conn: DbConn): GenerationPause | null {
+  return getSetting<GenerationPause>(conn, "generation_paused");
+}
+
+export function pauseGeneration(conn: DbConn, reason: string, actor: string): void {
+  setSetting(conn, "generation_paused", { reason, pausedAt: nowIso(), pausedBy: actor } satisfies GenerationPause);
+  audit(conn, actor, "generation_pause", "settings", "generation_paused", { reason });
+}
+
+export function resumeGeneration(db: Db, actor: string): void {
+  if (actor !== "owner") throw new Error("生成の再開は代表者(owner)のみが行えます");
+  db.transaction((tx) => {
+    tx.delete(t.settings).where(eq(t.settings.key, "generation_paused")).run();
+    audit(tx, actor, "generation_resume", "settings", "generation_paused");
+  });
+}
+
+const GENERATION_TASK_TYPES = new Set(["plan_posts", "write_copy", "design", "render"]);
 
 /**
  * QA提出(紫苑のタスク完了+qa_reviews記録+投稿遷移を1トランザクションで)。
@@ -615,9 +1163,21 @@ export function submitQa(db: Db, taskId: string, content: unknown, actor: string
     if (!task.postId) throw new Error("QAタスクにpostIdがありません");
     const post = getPostOrThrow(tx, task.postId);
 
-    // pass時のみ: 最新copy→spec→PNG一式の連鎖を検証(failは従来どおりdrafting差し戻し)
+    const rules = loadQaRules();
     if (report.result === "pass") {
-      assertPostContentIntegrity(tx, post.id);
+      // 構造ルール(V3-A): AIの自己申告と矛盾するpassを構造的に拒否
+      if (rules.pass_requires_all_checklist_ok && report.checklist.some((c) => !c.ok)) {
+        throw new Error("passなのにchecklistに不合格項目(ok=false)があります。failまたは項目の再確認が必要です");
+      }
+      if (rules.pass_requires_no_issues && report.issues.length > 0) {
+        throw new Error("重大指摘(issues)が残る状態ではpassできません。軽微な指摘はnotesへ、重大ならfailにしてください");
+      }
+      // 成果物整合性(最新copy→spec→PNG一式)
+      const integrity = assertPostContentIntegrity(tx, post.id);
+      // 通常コード検査: 禁止語・顧客名漏えい・source要求(AIの申告に依存しない)
+      assertPublicTextSafety(tx, post, integrity.copy);
+      // 権利: 実績投稿は許可記録がなければQA合格不可
+      assertPortfolioRightsForPost(tx, post, integrity.spec);
     }
 
     const artifactId = insertContentArtifactIn(tx, task, report, actor);
@@ -629,6 +1189,7 @@ export function submitQa(db: Db, taskId: string, content: unknown, actor: string
         result: report.result,
         checklistJson: JSON.stringify(report.checklist),
         issuesJson: JSON.stringify(report.issues),
+        notesJson: JSON.stringify(report.notes),
         reviewerId: task.assigneeId,
         createdAt: nowIso(),
       })
@@ -637,11 +1198,18 @@ export function submitQa(db: Db, taskId: string, content: unknown, actor: string
     if (post.status === "drafting") setPostStatus(tx, post, "qa_review");
     const inReview = getPostOrThrow(tx, post.id);
     if (report.result === "pass") {
-      setPostStatus(tx, inReview, "awaiting_approval");
+      setPostStatus(tx, inReview, "awaiting_approval", { rightsState: post.portfolioItemId ? "clear" : inReview.rightsState });
+    } else if (report.result === "blocked_rights") {
+      // 権利確認待ち: 承認キューへ進めず、rights_stateで識別する(V3-A, docs/06)
+      setPostStatus(tx, inReview, "drafting", { rightsState: "blocked_rights" });
     } else {
       setPostStatus(tx, inReview, "drafting");
     }
-    audit(tx, actor, "qa_review", "post", post.id, { result: report.result, issues: report.issues.length });
+    audit(tx, actor, "qa_review", "post", post.id, {
+      result: report.result,
+      issues: report.issues.length,
+      notes: report.notes.length,
+    });
     completeTaskIn(tx, task, actor, { estOutputChars: JSON.stringify(report).length });
     return { artifactId, result: report.result };
   });
@@ -720,8 +1288,11 @@ export function decidePost(
       throw new Error(`承認待ちでない投稿には判断できません(現在: ${post.status})`);
     }
     if (decision === "approved") {
-      // 最終防御: 承認時点でも最新copy⇄画像の連鎖と最新QA合格を再確認(P1指摘2)
-      assertPostContentIntegrity(tx, postId);
+      // 最終防御(P1指摘2+V3-A): 整合性・最新QA合格・権利・禁止語を承認時点でも再検証
+      if (post.rightsState === "blocked_rights") {
+        throw new Error("権利確認待ちの投稿は承認できません(実績画面で許可を記録し、再QAが必要です)");
+      }
+      const integrity = assertPostContentIntegrity(tx, postId);
       const latestQa = tx
         .select()
         .from(t.qaReviews)
@@ -732,6 +1303,8 @@ export function decidePost(
       if (!latestQa || latestQa.result !== "pass") {
         throw new Error(`整合性エラー: 最新のQA結果が合格ではありません(${latestQa?.result ?? "QAなし"})`);
       }
+      assertPublicTextSafety(tx, post, integrity.copy);
+      assertPortfolioRightsForPost(tx, post, integrity.spec);
     }
     const approvalId = ulid();
     tx.insert(t.approvals)
@@ -785,50 +1358,80 @@ export interface ApprovalQueueItem {
   plan: Record<string, unknown> | null;
   copy: Record<string, unknown> | null;
   copyVersion: number | null;
-  qa: { result: string; checklist: unknown; issues: unknown; createdAt: string } | null;
+  qa: { result: string; checklist: unknown; issues: string[]; notes: string[]; createdAt: string } | null;
   imageArtifactIds: string[];
   decisions: { decision: string; comment: string | null; decidedAt: string }[];
+  /** 紐付いた情報源(URL・日付を承認画面で確認できる。V3-B) */
+  sources: LinkedSource[];
+  /** 整合性・形式に問題がある場合の日本語説明(V3-J)。設定時は承認不可として表示 */
+  integrityError: string | null;
 }
 
 export function listApprovalQueue(db: Db): ApprovalQueueItem[] {
   const posts = db.select().from(t.posts).where(eq(t.posts.status, "awaiting_approval")).orderBy(asc(t.posts.plannedDate)).all();
-  return posts.map((post) => {
-    const arts = db
-      .select()
-      .from(t.artifacts)
-      .where(eq(t.artifacts.postId, post.id))
-      .orderBy(desc(t.artifacts.version), desc(t.artifacts.createdAt))
-      .all();
-    const latestByKind = (kind: string) => arts.find((a) => a.kind === kind);
-    const copy = latestByKind("copy");
-    const plan = latestByKind("post_plan");
-    const latestImageVersion = arts.find((a) => a.kind === "image")?.version ?? null;
-    const images = latestImageVersion
-      ? arts.filter((a) => a.kind === "image" && a.version === latestImageVersion).sort((a, b) => (a.filePath ?? "").localeCompare(b.filePath ?? ""))
-      : [];
-    const qaRow = db.select().from(t.qaReviews).where(eq(t.qaReviews.postId, post.id)).orderBy(desc(t.qaReviews.createdAt)).limit(1).get();
-    const decisions = db
-      .select()
-      .from(t.approvals)
-      .where(and(eq(t.approvals.subjectType, "post"), eq(t.approvals.subjectId, post.id)))
-      .orderBy(desc(t.approvals.decidedAt))
-      .all();
-    return {
-      post,
-      plan: plan?.contentJson ? (JSON.parse(plan.contentJson) as Record<string, unknown>) : null,
-      copy: copy?.contentJson ? (JSON.parse(copy.contentJson) as Record<string, unknown>) : null,
-      copyVersion: copy?.version ?? null,
-      qa: qaRow
-        ? {
-            result: qaRow.result,
-            checklist: qaRow.checklistJson ? JSON.parse(qaRow.checklistJson) : [],
-            issues: qaRow.issuesJson ? JSON.parse(qaRow.issuesJson) : [],
-            createdAt: qaRow.createdAt,
-          }
-        : null,
-      imageArtifactIds: images.map((a) => a.id),
-      decisions: decisions.map((d) => ({ decision: d.decision, comment: d.comment, decidedAt: d.decidedAt })),
-    };
+  return posts.map((post): ApprovalQueueItem => {
+    // 1投稿の破損でキュー全体を落とさない(V3-J)
+    try {
+      const arts = db
+        .select()
+        .from(t.artifacts)
+        .where(eq(t.artifacts.postId, post.id))
+        .orderBy(desc(t.artifacts.version), desc(t.artifacts.createdAt))
+        .all();
+      const copyKind = templateFor(post.templateId).copyKind;
+      const copy = arts.find((a) => a.kind === copyKind);
+      const plan = arts.find((a) => a.kind === "post_plan");
+      const latestImageVersion = arts.find((a) => a.kind === "image")?.version ?? null;
+      const images = latestImageVersion
+        ? arts
+            .filter((a) => a.kind === "image" && a.version === latestImageVersion)
+            .sort((a, b) => (a.filePath ?? "").localeCompare(b.filePath ?? ""))
+        : [];
+      const qaRow = db.select().from(t.qaReviews).where(eq(t.qaReviews.postId, post.id)).orderBy(desc(t.qaReviews.createdAt)).limit(1).get();
+      const decisions = db
+        .select()
+        .from(t.approvals)
+        .where(and(eq(t.approvals.subjectType, "post"), eq(t.approvals.subjectId, post.id)))
+        .orderBy(desc(t.approvals.decidedAt))
+        .all();
+      let integrityError: string | null = null;
+      try {
+        assertPostContentIntegrity(db, post.id);
+      } catch (e) {
+        integrityError = e instanceof Error ? e.message : String(e);
+      }
+      return {
+        post,
+        plan: plan?.contentJson ? (JSON.parse(plan.contentJson) as Record<string, unknown>) : null,
+        copy: copy?.contentJson ? (JSON.parse(copy.contentJson) as Record<string, unknown>) : null,
+        copyVersion: copy?.version ?? null,
+        qa: qaRow
+          ? {
+              result: qaRow.result,
+              checklist: qaRow.checklistJson ? JSON.parse(qaRow.checklistJson) : [],
+              issues: qaRow.issuesJson ? (JSON.parse(qaRow.issuesJson) as string[]) : [],
+              notes: qaRow.notesJson ? (JSON.parse(qaRow.notesJson) as string[]) : [],
+              createdAt: qaRow.createdAt,
+            }
+          : null,
+        imageArtifactIds: images.map((a) => a.id),
+        decisions: decisions.map((d) => ({ decision: d.decision, comment: d.comment, decidedAt: d.decidedAt })),
+        sources: getLinkedSources(db, post.id),
+        integrityError,
+      };
+    } catch (e) {
+      return {
+        post,
+        plan: null,
+        copy: null,
+        copyVersion: null,
+        qa: null,
+        imageArtifactIds: [],
+        decisions: [],
+        sources: [],
+        integrityError: `この投稿のデータを読み込めませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
   });
 }
 
@@ -838,18 +1441,19 @@ export function getArtifactFile(db: Db, artifactId: string): { filePath: string 
   return { filePath: a.filePath };
 }
 
-/** 投稿の最新コンテンツ(plan+copy)。レンダラーが使用 */
+/** 投稿の最新コンテンツ(plan+テンプレートに応じたコピー)。レンダラーが使用 */
 export function getPostContent(
   db: Db,
   postId: string,
 ): {
   post: typeof t.posts.$inferSelect;
   plan: PostPlan | null;
-  copy: Copy | null;
+  copy: AnyCopy | null;
   copyVersion: number | null;
   copyArtifactId: string | null;
 } {
   const post = getPostOrThrow(db, postId);
+  const copyKind = templateFor(post.templateId).copyKind;
   const arts = db
     .select()
     .from(t.artifacts)
@@ -857,14 +1461,139 @@ export function getPostContent(
     .orderBy(desc(t.artifacts.version), desc(t.artifacts.createdAt))
     .all();
   const planRow = arts.find((a) => a.kind === "post_plan");
-  const copyRow = arts.find((a) => a.kind === "copy");
+  const copyRow = arts.find((a) => a.kind === copyKind);
   return {
     post,
     plan: planRow?.contentJson ? postPlanArtifactSchema.parse(JSON.parse(planRow.contentJson)) : null,
-    copy: copyRow?.contentJson ? copyArtifactSchema.parse(JSON.parse(copyRow.contentJson)) : null,
+    copy: copyRow?.contentJson ? anyCopySchema.parse(JSON.parse(copyRow.contentJson)) : null,
     copyVersion: copyRow?.version ?? null,
     copyArtifactId: copyRow?.id ?? null,
   };
+}
+
+// ---------- V3-C: 実績素材・公開許可(書き込みは代表者のUI/S-06から) ----------
+
+export interface PortfolioInput {
+  customerName: string;
+  siteUrl?: string;
+  anonymousName?: string;
+  summary?: string;
+  technologies?: string[];
+  problem?: string;
+  testimonial?: string;
+  assetsPath?: string;
+}
+
+/** 実績登録。公開許可は初期状態pending(既存実績3件も登録時はpendingから始める) */
+export function addPortfolioItem(db: Db, input: PortfolioInput, actor: string): { itemId: string; permissionId: string } {
+  if (!input.customerName?.trim()) throw new Error("顧客名は必須です");
+  if (input.siteUrl?.trim()) {
+    input.siteUrl = normalizeHttpUrl(input.siteUrl.trim(), "顧客URL"); // http/httpsのみ許可(V3レビュー指摘4)
+  }
+  return db.transaction((tx) => {
+    const permissionId = ulid();
+    tx.insert(t.customerPermissions)
+      .values({
+        id: permissionId,
+        customerName: input.customerName.trim(),
+        scopeJson: JSON.stringify({ name: false, url: false, screenshot: false, testimonial: false }),
+        status: "pending",
+        evidencePath: null,
+        grantedAt: null,
+        expiresAt: null,
+        anonymousAllowed: 0,
+        revokedAt: null,
+      })
+      .run();
+    const itemId = ulid();
+    tx.insert(t.portfolioItems)
+      .values({
+        id: itemId,
+        customerName: input.customerName.trim(),
+        siteUrl: input.siteUrl?.trim() || null,
+        assetsPath: input.assetsPath?.trim() || null,
+        highlightsJson: null,
+        permissionId,
+        createdAt: nowIso(),
+        anonymousName: input.anonymousName?.trim() || null,
+        summary: input.summary?.trim() || null,
+        technologiesJson: input.technologies ? JSON.stringify(input.technologies) : null,
+        problem: input.problem?.trim() || null,
+        testimonial: input.testimonial?.trim() || null,
+      })
+      .run();
+    audit(tx, actor, "portfolio_add", "portfolio_item", itemId, { customerName: input.customerName.trim() });
+    return { itemId, permissionId };
+  });
+}
+
+export interface PermissionUpdate {
+  status: "pending" | "approved" | "rejected" | "revoked";
+  scope?: PermissionScope;
+  anonymousAllowed?: boolean;
+  evidencePath?: string;
+  grantedAt?: string;
+  expiresAt?: string;
+}
+
+/**
+ * 公開許可の記録・変更(代表者のみ。UIから)。すべて監査ログへ。
+ * - approved: 証跡必須+scope(4項目の個別選択)必須。一括固定scopeは廃止(V3レビュー指摘1)
+ * - anonymousAllowed=true: 証跡必須(匿名利用にも同意記録が必要)
+ * - 許可変更後、既存の承認待ち投稿は承認時の再検査(assertPortfolioRightsForPost)で
+ *   表示名・許可状態との不整合が検出され、再レンダリング+再QAが要求される
+ */
+export function updatePermission(db: Db, permissionId: string, update: PermissionUpdate, actor: string): void {
+  if (actor !== "owner") throw new Error("公開許可の記録・変更は代表者(owner)のみが行えます");
+  db.transaction((tx) => {
+    const perm = tx.select().from(t.customerPermissions).where(eq(t.customerPermissions.id, permissionId)).get();
+    if (!perm) throw new Error(`許可レコードが見つかりません: ${permissionId}`);
+    const evidence = update.evidencePath?.trim() || perm.evidencePath;
+    const nextAnonymous = update.anonymousAllowed === undefined ? perm.anonymousAllowed === 1 : update.anonymousAllowed;
+    // P1-3: 証跡パスは任意文字列として信用せず、07_customer-permissions/配下の実在ファイルのみ受け付ける
+    if (update.status === "approved" || nextAnonymous) {
+      const st = evidenceFileStatus(evidence);
+      if (!st.ok) {
+        throw new Error(`許可を記録できません: ${st.reason}(Q4: 同意記録の保存)`);
+      }
+    }
+    if (update.status === "approved" && !update.scope) {
+      throw new Error("承認(approved)には許可範囲(scope: name/url/screenshot/testimonial)の個別指定が必要です");
+    }
+    tx.update(t.customerPermissions)
+      .set({
+        status: update.status,
+        scopeJson: update.scope ? JSON.stringify(permissionScopeSchema.parse(update.scope)) : perm.scopeJson,
+        anonymousAllowed: nextAnonymous ? 1 : 0,
+        evidencePath: evidence,
+        grantedAt: update.status === "approved" ? (update.grantedAt ?? todayLocal()) : perm.grantedAt,
+        expiresAt: update.expiresAt ?? perm.expiresAt,
+        revokedAt: update.status === "revoked" ? nowIso() : perm.revokedAt,
+      })
+      .where(eq(t.customerPermissions.id, permissionId))
+      .run();
+    audit(tx, actor, "permission_recorded", "customer_permission", permissionId, {
+      status: update.status,
+      scope: update.scope,
+      anonymousAllowed: update.anonymousAllowed,
+    });
+  });
+}
+
+export interface PortfolioView {
+  item: typeof t.portfolioItems.$inferSelect;
+  permission: typeof t.customerPermissions.$inferSelect | null;
+  rights: RightsCheck;
+}
+
+export function listPortfolio(db: Db): PortfolioView[] {
+  const items = db.select().from(t.portfolioItems).orderBy(desc(t.portfolioItems.createdAt)).all();
+  return items.map((item) => {
+    const permission = item.permissionId
+      ? (db.select().from(t.customerPermissions).where(eq(t.customerPermissions.id, item.permissionId)).get() ?? null)
+      : null;
+    return { item, permission, rights: checkPortfolioRights(db, item.id) };
+  });
 }
 
 // ---------- 表示状態(読み取り) ----------
@@ -889,6 +1618,8 @@ export interface CompanyStateView {
   employees: EmployeeStateView[];
   departments: { id: string; name: string; status: string; unlockNote: string | null }[];
   counts: { awaitingApproval: number; errors: number; running: number };
+  /** V3-H: 生成停止中はその理由(nullなら通常運転) */
+  generationPause: GenerationPause | null;
 }
 
 export function getCompanyState(db: Db, now: Date = new Date()): CompanyStateView {
@@ -966,6 +1697,7 @@ export function getCompanyState(db: Db, now: Date = new Date()): CompanyStateVie
       errors: views.filter((v) => v.display.state === "error" || v.display.state === "stale").length,
       running: views.filter((v) => ["researching", "meeting", "creating", "qa"].includes(v.display.state)).length,
     },
+    generationPause: getGenerationPause(db),
   };
 }
 
@@ -977,6 +1709,8 @@ export interface EmployeeDetailView {
   artifacts: { id: string; kind: string; version: number; createdAt: string; taskId: string; contentJson: string | null }[];
   usage: { estInputChars: number; estOutputChars: number; wallSeconds: number; records: number };
   nextPlanned: { id: string; title: string; status: string }[];
+  /** この社員の成果物が含まれる承認待ち投稿(V3-I: 誰が何を待っているか) */
+  awaitingPosts: { id: string; title: string }[];
 }
 
 export function getEmployeeDetail(db: Db, employeeId: string, now: Date = new Date()): EmployeeDetailView | null {
@@ -1042,5 +1776,12 @@ export function getEmployeeDetail(db: Db, employeeId: string, now: Date = new Da
     nextPlanned: mine
       .filter((x) => x.status === "queued" || x.status === "pending")
       .map((x) => ({ id: x.id, title: x.title, status: x.status })),
+    awaitingPosts: db
+      .selectDistinct({ id: t.posts.id, title: t.posts.title })
+      .from(t.posts)
+      .innerJoin(t.artifacts, eq(t.artifacts.postId, t.posts.id))
+      .innerJoin(t.tasks, eq(t.artifacts.taskId, t.tasks.id))
+      .where(and(eq(t.posts.status, "awaiting_approval"), eq(t.tasks.assigneeId, employeeId)))
+      .all(),
   };
 }

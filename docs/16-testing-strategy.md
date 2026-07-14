@@ -45,3 +45,7 @@
 ## 5. CI【推奨・任意】
 
 - GitHub Actions(無料枠): lint + unit + integration。E2Eはローカル実行(Playwright起動時間節約)。AI呼び出しはCIで行わない(費用・認証なし)
+
+### V3追補(2026-07-13 実装反映)
+- 追加テストスイート: `v3-gates`(QA構造ルール・禁止語・sources・権利・上限・旧データ互換)/ `v3-templates`(tpl-news/tpl-portfolioの5ページ・決定性・権利ゲート)/ `v3-review-fixes`(scope個別強制・上限境界値(未満/一致/超過/最終タスク/翌日維持)・URL検証)/ `migrations`(空DB・V2形式DB・再実行・途中失敗ロールバック・データ保持・FK/重複拒否・PRAGMA検証)
+- マイグレーションのテストは `BASE_DDL`(V2形状)から実DB相当を構築して検証する

@@ -50,3 +50,11 @@
 | 権限 | 操作はすべてユースケース関数経由(後からガードを挿せる) |
 | 暗号化 | 保存時暗号化が必要な列(permissions証跡パス等)を特定済みにしておく |
 | テナント分離 | MVPは単一テナントだが、エンティティにtenant前提のID設計(ULID)を採用 |
+
+### V3追補(2026-07-13 実装反映・レビュー指摘1対応)
+- 公開許可は**scope 4項目(name/url/screenshot/testimonial)の個別許可**。`scope_json`はZod検証で解析し、不正・欠落は全不許可として扱う
+- approvedでも `scope.name=false` なら実名は使用不可。匿名利用は `anonymousAllowed=true` **かつ証跡(evidencePath)がある場合のみ**。approvedの記録には証跡+scope個別指定が必須(一括固定scopeは廃止)
+- 許可範囲外の顧客名・URL・お客様の声は通常コード(`findCustomerDataViolations`)がQA時・承認時に検出して拒否する
+- **AIプロンプトへ渡す前のマスク**: CLIの`portfolio-list`は許可範囲でマスク済みビュー(`listPortfolioForAi`)のみを返す(scope.screenshot=falseの素材パス、scope.url=falseのURL、scope.testimonial=falseの声は渡らない)
+- 許可変更後は承認時の再検査で旧画像(旧表示名)との不整合を検出し、再レンダリング+再QAを要求する
+- URL(source/顧客サイト)は**http/httpsのみ許可**し、正規化して保存する(javascript:/data:/file:等を拒否)

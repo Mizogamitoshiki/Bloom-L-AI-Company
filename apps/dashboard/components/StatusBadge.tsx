@@ -26,10 +26,10 @@ const ICONS: Record<DisplayState, (p: { size?: number }) => JSX.Element> = {
   stale: IconQuestion,
 };
 
-export function StatusBadge({ state, suffix }: { state: DisplayState; suffix?: string }): JSX.Element {
+export function StatusBadge({ state, suffix, solid }: { state: DisplayState; suffix?: string; solid?: boolean }): JSX.Element {
   const Icon = ICONS[state];
   return (
-    <span className="badge" data-state={state}>
+    <span className={`status-badge${solid ? " status-badge--solid" : ""}`} data-state={state}>
       <Icon size={12} />
       {DISPLAY_LABEL[state]}
       {suffix ? ` ${suffix}` : ""}

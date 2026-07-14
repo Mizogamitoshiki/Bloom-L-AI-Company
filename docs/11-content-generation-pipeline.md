@@ -80,3 +80,9 @@ data/workspace/05_generated-posts/{post-id}_{slug}/
 ```
 
 - 承認済み(approved)のみ書き出し可能。書き出しはaudit_logに記録
+
+### V3追補(2026-07-13 実装反映)
+- テンプレートレジストリ(`src/core/templates/index.ts`)導入。templateIdから通常コードでレンダラー・スロット・期待ページ数を解決(CLIへの分岐直書き禁止)
+- **tpl-news**: 表紙→事実→Bloom-Lの見解(分離ラベル)→事業者への影響→出典+CTA(5ページ)。出典はDB登録済みsourcesから通常コードが注入(確認済みsource必須)
+- **tpl-portfolio**: 表紙→課題→対応→成果→技術+CTA(5ページ)。表示名(実名/匿名)は公開許可のscopeから通常コードが決定。未許可はレンダリング前に拒否
+- carousel_specはtemplateId判別union+`sourceCopyArtifactId`(不変ID)でQA整合性ゲートに接続

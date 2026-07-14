@@ -5,7 +5,7 @@
  * - 文字あふれ第2層: SLOTS定義に基づくSatori実測(renderer.measureSlotOverflows)
  * レンダリングは決定的(同一spec+同一トークン→同一出力)。
  */
-import type { CarouselSpec, Slides, PostPlan } from "../schemas";
+import type { HowtoSpec, Slides, PostPlan } from "../schemas";
 
 export const CANVAS = { width: 1080, height: 1350 } as const;
 export const SAFE = 64; // セーフエリア(px)
@@ -20,7 +20,7 @@ export interface BrandColors {
   inkMuted: string;
 }
 
-export const PILLAR_LABEL: Record<CarouselSpec["pillar"], string> = {
+export const PILLAR_LABEL: Record<HowtoSpec["pillar"], string> = {
   "1": "IT・AIニュース",
   "2": "HPの役割",
   "3": "HPで変わる",
@@ -55,7 +55,7 @@ export interface SlotText {
 }
 
 /** specから実測すべき全スロットを列挙 */
-export function enumerateSlots(spec: CarouselSpec): SlotText[] {
+export function enumerateSlots(spec: HowtoSpec): SlotText[] {
   const s: SlotText[] = [
     { def: SLOT_DEFS.coverTitle, slotPath: "cover.title", text: spec.slides.cover.title },
   ];
@@ -129,7 +129,7 @@ function pageDots(colors: BrandColors, total: number, current: number): SatoriNo
   return el("div", { display: "flex", gap: 10, justifyContent: "center", width: "100%" }, dots);
 }
 
-export function buildPages(spec: CarouselSpec, colors: BrandColors): SatoriNode[] {
+export function buildPages(spec: HowtoSpec, colors: BrandColors): SatoriNode[] {
   const total = spec.slides.pages.length + 2;
   const pillarLabel = PILLAR_LABEL[spec.pillar];
   const pages: SatoriNode[] = [];
@@ -273,11 +273,11 @@ export function buildPages(spec: CarouselSpec, colors: BrandColors): SatoriNode[
 }
 
 /** 昊のplanと琴葉のcopyからカルーセル仕様を構築する(通常コード。AIを使わない) */
-export function buildSpecFromContent(plan: PostPlan, sourceCopyArtifactId: string, slides: Slides): CarouselSpec {
+export function buildSpecFromContent(plan: PostPlan, sourceCopyArtifactId: string, slides: Slides): HowtoSpec {
   return { kind: "carousel_spec", templateId: "tpl-howto", pillar: plan.pillar, sourceCopyArtifactId, slides };
 }
 
 /** テンプレートの期待ページ数(表紙+本文+CTA)。QAゲートの枚数検証に使用 */
-export function expectedPageCount(spec: CarouselSpec): number {
+export function expectedPageCount(spec: HowtoSpec): number {
   return spec.slides.pages.length + 2;
 }

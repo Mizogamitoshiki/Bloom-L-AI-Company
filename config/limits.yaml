@@ -1,9 +1,11 @@
 # 利用量・安全装置のしきい値(docs/14)
 daily:
-  max_generated_posts: 3
+  max_generated_posts: 3      # 1日の新規投稿上限(通常運用は1本)
   max_tasks: 20
   max_heavy_escalations: 3
-  max_research_fetches: 15
+  max_research_fetches: 15     # source取得・登録の日次上限
+  max_est_output_chars: 300000 # 推定出力文字数の日次上限(到達・超過で生成を自動停止・代表者再開まで)
+  max_agent_launches: 12       # AI社員タスク起動(startedイベント)の日次上限
 retry:
   per_task: 2          # 超過でfailed(無制限再試行の禁止・確定§10)
   replan_days: 2

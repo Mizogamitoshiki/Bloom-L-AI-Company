@@ -66,6 +66,21 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
             </h2>
             <StatusBadge state={detail.display.state} />
             <p style={{ fontSize: 13, marginTop: 6 }}>{detail.display.reason}</p>
+            <p style={{ fontSize: 12, color: "var(--color-ink-muted)" }}>
+              使用モデルプロファイル: {detail.employee.modelProfile} / 最終イベント: {fmt(detail.display.lastEventAt)}
+            </p>
+            {detail.awaitingPosts.length > 0 ? (
+              <div style={{ fontSize: 13, background: "#fff8e8", border: "1px solid var(--color-warning)", borderRadius: 6, padding: 8, marginTop: 6 }}>
+                <strong>承認待ちの投稿({detail.awaitingPosts.length}件):</strong>
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {detail.awaitingPosts.map((p) => (
+                    <li key={p.id}>
+                      <a href="/approvals">{p.title}</a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
 
             <div className="section">
               <h3>現在のタスク</h3>

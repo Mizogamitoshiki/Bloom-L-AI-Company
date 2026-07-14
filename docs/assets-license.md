@@ -13,3 +13,30 @@
 ## 禁止事項(docs/13)
 - 出所不明の素材・ライセンス未確認のピクセルアート素材の使用
 - 他者画像の無断転載(顧客素材は customer_permissions の記録がある場合のみ)
+
+## ブランドマニフェスト(V3-K, 2026-07-13)
+
+`data/workspace/01_brand/brand-manifest.json` を配置すると、**コード変更なしで**ブランド素材が読み込まれる(未配置時はプレースホルダーで動作)。スキーマは `src/adapters/config.ts` の `brandManifestSchema` が正。
+
+```json
+{
+  "updatedAt": "2026-07-20",
+  "rights": "ロゴ・カラーはBloom-L所有。第三者素材を含まない",
+  "logo": { "file": "logo.svg", "usage": "カルーセル左上・最小24px" },
+  "colors": { "primary": "#2f6f4f", "primaryDark": "#1e4a34", "accent": "#e8a13a", "surface": "#f6f3ec", "ink": "#22281f", "inkMuted": "#5c6357" },
+  "fonts": [{ "name": "Noto Sans JP", "license": "SIL OFL 1.1" }],
+  "rules": ["ロゴの変形・再配色禁止", "背景とのコントラスト4.5:1以上"]
+}
+```
+
+- `colors` があれば brand-tokens.json より優先される(UI・カルーセル両方に反映)
+- `rights`(権利情報)と `updatedAt` は必須。素材を差し替えたら必ず更新し、この台帳にも追記する
+- 検証: `pnpm company doctor` がマニフェストの有無・ロゴ実在を確認する
+
+## V3 UI Polish(2026-07-14)
+
+| 資産 | 生成元 / 入手元 | ライセンス | 利用条件・備考 | 追加日 |
+|---|---|---|---|---|
+| 正式ロゴ `data/workspace/01_brand/logo.png`(+@2x) | 提供された正式デザインから抽出(AI描き直しなし・同一縦横比 約2.6:1 を維持) | Bloom-L所有 | サイドバー/トップバー左上。/api/brand/logo で配信。差し替えは同名・同縦横比で置換すれば**コード変更不要** | 2026-07-14 |
+| ブランドカラー(brand-manifest.json colors) | 正式ロゴ画像からsharpでピクセルサンプリング(ロイヤルブルー #0b46b8 系) | Bloom-L所有 | primary/hover/soft/border 等のセマンティックトークンへ layout.tsx が注入。目視ではなく実測値 | 2026-07-14 |
+| オフィス家具・スプライト(CSS/DOM生成) | 本プロジェクトで自作(CSS疑似要素+コード生成SVGアバター) | プロジェクトに帰属 | Canvas/Phaser/PixiJS不使用。DOM/CSSのみ | 2026-07-14 |

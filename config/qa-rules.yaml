@@ -1,0 +1,11 @@
+# QA構造ルール(docs/15, V3-A/B)。通常コードがQA提出時・承認時に強制する
+pass_requires_all_checklist_ok: true   # passなのにchecklistにfalse → 拒否
+pass_requires_no_issues: true          # passなのにissues(重大指摘)が残る → 拒否(軽微はnotesへ)
+require_sources_for_pillars: ["1"]     # ニュース系の柱はsource必須
+latest_phrases:                        # これらの語は公開日+確認日の揃ったsourceがある場合のみ
+  - "最新"
+source_required_patterns:              # 統計・調査系の主張はsource必須(正規表現)
+  - "調査によると"
+  - "統計(で|に|上)"
+  - "[0-9０-９]{1,3}(\\.[0-9０-９]+)?(%|%|割)の(人|企業|事業者|お客様|方)"
+min_sources_for_strong_claims: 2       # 重大な主張の断定に必要な情報源数(単一情報源で断定しない)

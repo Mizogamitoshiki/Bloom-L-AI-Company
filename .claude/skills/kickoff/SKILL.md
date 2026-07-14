@@ -71,8 +71,28 @@ pnpm company start --task <qaTaskId> --actor shion
 3. `pnpm company qa --task <qaTaskId> --file runs/<date>/qa.json --actor shion`
    - pass → 投稿は承認キューへ / fail → draftingへ差し戻し(理由をサマリーに含める)
 
+### 5b. ニュース投稿(tpl-news)を作る場合の追加手順(V3-B)
+1. 凛(rin)サブエージェントに調査テーマを渡し、source JSON配列を受け取る(凛はWebSearch/WebFetchのみ。CLIは実行しない)
+2. 各sourceをオーケストレーターが登録・紐付け:
+```bash
+pnpm company source-add --json '<source>' --actor rin     # URL重複は既存IDが返る
+pnpm company source-link --post <postId> --source <sourceId> --actor aoi
+```
+3. create-post時に `"templateId":"tpl-news"` を指定。renderは確認済みsourceが無いと失敗する(出典スライドは通常コードが注入)
+4. 「最新」という表現は公開日+確認日の揃ったsourceがある場合のみ使える(QAが機械検査する)
+
+### 5c. 実績投稿(tpl-portfolio)を作る場合の追加手順(V3-C)
+1. `pnpm company portfolio-list` で実績と許可状態を確認。**利用可否がfalseの実績は使えない**(代表者が /portfolio で許可を記録するまで待つ。勝手に進めない)
+2. create-post時に `"templateId":"tpl-portfolio","portfolioItemId":"<id>"` を指定
+3. 顧客名・匿名名はシステムが許可状態から自動決定する。**コピーに顧客名を書かせない**
+
+### 5d. 上限・停止(V3-H)
+- `company status` の `generationPause` が非nullなら新規生成を行わず、理由をサマリーで代表者に報告する。**再開はしない(できない)**
+- 1日の新規投稿は上限3本(通常1本)。承認待ち5件以上で生成は自動停止する
+
 ### 6. 終了とサマリー
 ```bash
+pnpm company daily-report        # 日報の生成・保存(通常コード集計。V3-G)
 pnpm company run-finish --run <runId>
 pnpm --silent company status
 ```

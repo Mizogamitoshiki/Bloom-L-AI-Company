@@ -64,3 +64,15 @@ api:                            # API有効化時のみ
 
 - 上限到達時の挙動: 新規生成タスクを `budget_paused` にし、UI該当社員を「予算停止」表示。承認処理・日報などの軽量処理は継続
 - レート制限(Maxプラン枠)検出時: 当日runを「途中終了(理由: 利用枠)」として正常記録し、翌日kickoffが続きから再開(冪等キー)
+
+### V3追補(2026-07-13 実装反映・レビュー指摘2対応)
+- limits.yamlの実接続(**境界はすべて>=(到達で停止・拒否)**):
+  - `daily.max_generated_posts`(3。通常運用1)→ createPostで拒否
+  - `approval_queue.soft_cap`(5)→ 到達で生成を自動停止(generation_paused)
+  - `daily.max_est_output_chars` → usage_records追加直後に日次合計を再集計し、**同じ成功トランザクション内で停止を保存**(その日最後のタスクで超過しても停止が残る)。タスク作成時にも事前チェック
+  - `daily.max_research_fetches` → source登録(addSource)で拒否(重複返却は消費しない)
+  - `daily.max_heavy_escalations` → heavy昇格記録(company escalate)で拒否
+  - `daily.max_agent_launches`(新設)→ タスク起動(startedイベント)で拒否
+- 停止(generation_paused)は**代表者がUIから再開するまで日付をまたいでも維持**。理由はオフィスのバナー・pipeline・日報に表示
+- 自動停止の保存は生成トランザクションの外(または成功トランザクションの中)で行い、失敗ロールバックで停止が消えないようにする
+- これらはすべてMaxプラン枠内の推定量に対する運用ブレーキであり、API課金の発生・計測ではない(APIは引き続き既定で無効)

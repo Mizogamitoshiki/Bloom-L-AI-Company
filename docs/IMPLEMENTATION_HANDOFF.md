@@ -68,3 +68,13 @@ TZ=Asia/Tokyo
 | 日付 | 項目 | 状態 |
 |---|---|---|
 | — | (実装開始後に記入) | |
+
+## V3追補(2026-07-13 実装済み)
+
+V3(本格QA・sources・実績/権利・tpl-news/portfolio・S-04/05/06・日報・上限・旧データ互換・ブランドマニフェスト)は実装済み。不変条件の追加:
+
+13. 公開許可はscope 4項目の個別判定(`checkPortfolioRights`)。AIプロンプトへ顧客データを渡すときは必ず `listPortfolioForAi`(許可範囲マスク済み)を使う。生のportfolio_items/customer_permissionsをエージェントに渡さない
+14. 上限の境界は>=(到達で停止・拒否)。自動停止(generation_paused)の保存を失敗するトランザクションの中で行わない(ロールバックで消える)。解除はowner専用UIのみ
+15. スキーマ変更は `src/adapters/db/migrations.ts` にバージョン付きmigrationとして追加する(DDL直改変やその場ALTERをしない)。破壊的変更はprecheckで孤立・重複を検査し、勝手に削除せず日本語で停止する
+16. source/顧客URLは `normalizeHttpUrl`(http/httpsのみ・正規化)を必ず通す
+17. ブランド素材は `01_brand/brand-manifest.json`(brandManifestSchema)経由で読み込む。コードへの色・パス直書き禁止

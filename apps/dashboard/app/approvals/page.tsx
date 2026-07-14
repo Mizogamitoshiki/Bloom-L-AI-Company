@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
 import type { ApprovalQueueItem } from "@adapters/db/store";
 import { IconStamp, IconCheck, IconAlert } from "@/components/icons";
+import { AppShell, PageHeader } from "@/components/AppShell";
 
 type Action = "approve" | "reject" | "revise";
 
@@ -83,17 +84,8 @@ export default function ApprovalsPage(): JSX.Element {
   const checklist = (selected?.qa?.checklist ?? []) as QaChecklistItem[];
 
   return (
-    <div>
-      <header className="header">
-        <h1>承認キュー — Bloom-L AI Company</h1>
-        <span className="stat">
-          <IconStamp size={13} />
-          承認待ち {items?.length ?? "…"}件
-        </span>
-        <a href="/" style={{ marginLeft: "auto", color: "#fff" }}>
-          ← オフィスへ戻る
-        </a>
-      </header>
+    <AppShell current="/approvals" title="承認キュー">
+      <PageHeader title="承認キュー" subtitle="QA合格投稿のみが届きます。承認・却下・修正依頼はこの画面でのみ行えます。" />
 
       {notice ? (
         <p role="status" style={{ margin: 16, padding: 10, background: "#eef7ee", border: "1.5px solid var(--color-success)", borderRadius: 4 }}>
@@ -107,14 +99,14 @@ export default function ApprovalsPage(): JSX.Element {
       ) : null}
 
       {items && items.length === 0 ? (
-        <div style={{ padding: 32, maxWidth: 640, margin: "0 auto" }} id="main">
+        <div style={{ padding: 32, maxWidth: 640, margin: "0 auto" }}>
           <h2 style={{ fontSize: 17 }}>承認待ちの投稿はありません</h2>
           <p style={{ fontSize: 14 }}>QAに合格した投稿だけがここに届きます。/kickoff実行後に確認してください。</p>
         </div>
       ) : null}
 
       {selected ? (
-        <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16, padding: 16, maxWidth: 1200, margin: "0 auto" }} id="main">
+        <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16, padding: 16, maxWidth: 1200, margin: "0 auto" }}>
           <nav aria-label="承認待ち一覧">
             {items?.map((i) => (
               <button
@@ -134,6 +126,16 @@ export default function ApprovalsPage(): JSX.Element {
 
           <section aria-label="投稿プレビュー" style={{ background: "#fff", border: "2px solid var(--color-wall)", borderRadius: 8, padding: 16 }}>
             <h2 style={{ marginTop: 0, fontSize: 17 }}>{selected.post.title}</h2>
+
+            {selected.integrityError ? (
+              <div className="error-box" role="alert">
+                <strong>要修復 — この投稿はいま承認できません</strong>
+                <p style={{ margin: "6px 0 0" }}>{selected.integrityError}</p>
+                <p style={{ margin: "6px 0 0", fontSize: 12 }}>
+                  修復後(再レンダリング+再QA)に自動で承認可能になります。他の投稿の承認は通常どおり行えます。
+                </p>
+              </div>
+            ) : null}
 
             <h3 style={{ fontSize: 13, color: "var(--color-ink-muted)" }}>カルーセル({selected.imageArtifactIds.length}枚)</h3>
             <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8 }}>
@@ -168,16 +170,47 @@ export default function ApprovalsPage(): JSX.Element {
 
             <h3 style={{ fontSize: 13, color: "var(--color-ink-muted)", marginTop: 14 }}>QAレポート</h3>
             {selected.qa ? (
+              <>
+                <ul style={{ fontSize: 13, paddingLeft: 18 }}>
+                  {checklist.map((c, i) => (
+                    <li key={i}>
+                      {c.ok ? <IconCheck size={12} /> : <IconAlert size={12} />} {c.item}
+                      {c.note ? ` — ${c.note}` : ""}
+                    </li>
+                  ))}
+                </ul>
+                {selected.qa.notes.length > 0 ? (
+                  <div style={{ fontSize: 13, background: "#fff8e8", border: "1px solid var(--color-warning)", borderRadius: 6, padding: 8 }}>
+                    <strong>代表者確認をお願いしたい軽微な指摘:</strong>
+                    <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                      {selected.qa.notes.map((n, i) => (
+                        <li key={i}>{n}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <p style={{ fontSize: 13 }}>QAレポートがありません。</p>
+            )}
+
+            <h3 style={{ fontSize: 13, color: "var(--color-ink-muted)", marginTop: 14 }}>情報源(出典)</h3>
+            {selected.sources.length > 0 ? (
               <ul style={{ fontSize: 13, paddingLeft: 18 }}>
-                {checklist.map((c, i) => (
-                  <li key={i}>
-                    {c.ok ? <IconCheck size={12} /> : <IconAlert size={12} />} {c.item}
-                    {c.note ? ` — ${c.note}` : ""}
+                {selected.sources.map((s) => (
+                  <li key={s.id}>
+                    <a href={s.url} target="_blank" rel="noreferrer">
+                      {s.publisher}「{s.title}」
+                    </a>{" "}
+                    公開: {s.publishedAt || "不明"} / 確認: {s.checkedAt}
+                    {s.verificationStatus !== "confirmed" ? "(未確認)" : ""}
+                    {" / 区分: "}
+                    {s.factOrInference}
                   </li>
                 ))}
               </ul>
             ) : (
-              <p style={{ fontSize: 13 }}>QAレポートがありません。</p>
+              <p style={{ fontSize: 13 }}>この投稿に紐付いた情報源はありません(ニュース引用なし)。</p>
             )}
 
             {selected.decisions.length > 0 ? (
@@ -206,7 +239,13 @@ export default function ApprovalsPage(): JSX.Element {
                 style={{ width: "100%", font: "inherit", padding: 8, border: "2px solid var(--color-wall)", borderRadius: 4 }}
               />
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button type="button" disabled={busy} onClick={() => void act("approve")} style={{ background: "var(--color-success)", color: "#fff", border: "none", borderRadius: 4, padding: "8px 20px", fontWeight: 700 }}>
+                <button
+                  type="button"
+                  disabled={busy || !!selected.integrityError}
+                  title={selected.integrityError ? "要修復のため承認できません" : undefined}
+                  onClick={() => void act("approve")}
+                  style={{ background: "var(--color-success)", color: "#fff", border: "none", borderRadius: 4, padding: "8px 20px", fontWeight: 700, opacity: selected.integrityError ? 0.5 : 1 }}
+                >
                   承認する
                 </button>
                 <button type="button" disabled={busy} className="btn-secondary" onClick={() => void act("revise")}>
@@ -223,6 +262,6 @@ export default function ApprovalsPage(): JSX.Element {
           </section>
         </div>
       ) : null}
-    </div>
+    </AppShell>
   );
 }

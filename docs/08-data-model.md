@@ -186,3 +186,13 @@ employeeDisplayState(emp) =
 - 日次: kickoff終了時に `data/company.db` を `data/backups/company-{date}.db` へコピー(直近14世代)+ workspace差分
 - 週次: zip化し、代表者がGoogle Driveへ手動アップロード(将来Drive API化)【推奨RC-5】
 - 復旧: `company restore --from {date}` でDB差し替え → `company doctor` で整合確認
+
+### V3追補(2026-07-13 実装反映)
+- **schema_migrations** テーブルによるバージョン付きマイグレーションを導入(各migrationは1トランザクション・部分適用なし・孤立/重複データ検出時は日本語の理由と修復方法を提示して停止)
+- posts: `template_id`(tpl-howto/tpl-news/tpl-portfolio)/ `portfolio_item_id` / `created_at` を追加
+- sources: `fetched_at` / `usable` / `verification_status` を追加。**URLはhttp/httpsのみ・正規化して一意**(sources_url_uq)
+- customer_permissions: `anonymous_allowed` / `revoked_at` を追加。`scope_json` は `{name,url,screenshot,testimonial}` のZod検証済み構造(項目別許可)
+- portfolio_items: `anonymous_name` / `summary` / `technologies_json` / `problem` / `testimonial` を追加
+- qa_reviews: `notes_json`(軽微指摘)を追加。resultに `blocked_rights` を追加
+- FK追加(テーブル再構築による): post_sources(複合PK+posts/sources FK)、portfolio_items.permission_id、qa_reviews.post_id/artifact_id、reports.body_artifact_id
+- インデックス: posts(status/planned_date/created_at)、artifacts(post_id,kind,version)、qa_reviews(post_id,created_at)、task_events(task_id,seq)、usage_records(ts)、portfolio_items(permission_id)

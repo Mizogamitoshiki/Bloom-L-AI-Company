@@ -96,3 +96,70 @@ export const IconCoffee = (p: IconProps) => (
     <path d="M16 10h2a2.5 2.5 0 0 1 0 5h-2" />
   </Svg>
 );
+
+// --- V3 UI Polish: ナビ/シェル用アイコン ---
+export const IconHome = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 11.5 12 4l9 7.5" />
+    <path d="M5 10v9h5v-6h4v6h5v-9" />
+  </Svg>
+);
+export const IconKanban = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M8 4v9M16 4v6" />
+  </Svg>
+);
+export const IconCalendar = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="5" width="18" height="16" rx="2" />
+    <path d="M3 9h18M8 3v4M16 3v4" />
+  </Svg>
+);
+export const IconImage = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <circle cx="9" cy="10" r="1.6" />
+    <path d="m4 18 5-5 4 4 3-3 4 4" />
+  </Svg>
+);
+export const IconReport = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 3h9l4 4v14a0 0 0 0 1 0 0H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" />
+    <path d="M14 3v5h5M9 13h6M9 17h6" />
+  </Svg>
+);
+export const IconSettings = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2l-.3-2.5H8.7l-.3 2.5a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 4 12l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.3 2.4h4.6l.3-2.4a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" />
+  </Svg>
+);
+export const IconBell = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" />
+    <path d="M10 20a2 2 0 0 0 4 0" />
+  </Svg>
+);
+export const IconMenu = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 6h16M4 12h16M4 18h16" />
+  </Svg>
+);
+export const IconBuilding = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="4" y="3" width="16" height="18" rx="1.5" />
+    <path d="M8 7h2M14 7h2M8 11h2M14 11h2M8 15h2M14 15h2M10 21v-3h4v3" />
+  </Svg>
+);
+export const IconChevronRight = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m9 6 6 6-6 6" />
+  </Svg>
+);
+export const IconSparkle = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3v6M12 15v6M3 12h6M15 12h6" />
+    <path d="m6 6 3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" />
+  </Svg>
+);

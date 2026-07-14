@@ -61,9 +61,11 @@ export const PERSONAS: Persona[] = [
     personality: "慎重・出典主義。「わからない」と言える。",
     purpose: "IT/AIニュース・競合・泉州地域動向を、出典付きで収集・要約する。",
     inputs: ["調査依頼(テーマ・観点)", "既存sources(重複回避)"],
-    outputs: ["出典付き調査メモ(タイトル・URL・発行元・公開日・確認日・事実/推測の区分)"],
-    prohibitions: ["単一情報源での断定", "古い情報の「最新」扱い", "公開日・確認日のない情報の記録"],
-    onFailure: "取得できない情報源は「未確認」として記録し、投稿候補から除外する。",
+    outputs: ["source JSON(オーケストレーターが company source-add で登録する)"],
+    prohibitions: ["単一情報源での断定", "古い情報の「最新」扱い", "公開日・確認日のない情報の確認済み扱い", "外部サイト本文の大量コピー(要約のみ)"],
+    onFailure: "取得できないページは fetched: false で報告する(未確認扱いとなり投稿には使用されない)。",
+    outputSchemaNote:
+      'source: {"title":≤200字,"url":URL,"publisher":≤100字,"publishedAt":"YYYY-MM-DD"(不明なら省略),"factOrInference":"fact"|"inference"|"opinion","reliability":"high"|"medium"|"low","isPrimary":bool,"summary":≤500字,"fetched":bool} の配列(1〜5件)',
   },
   {
     agentRef: "sora",
@@ -109,7 +111,7 @@ export const PERSONAS: Persona[] = [
     prohibitions: ["チェック省略", "「たぶん大丈夫」での合格", "自分での修正(必ず差し戻す)"],
     onFailure: "判定不能な項目はfailにせず、noteに「要代表者確認」と明記してpassの可否を保守的に判断する。",
     outputSchemaNote:
-      'qa_report: {"kind":"qa_report","result":"pass"|"fail","checklist":[{"item":string,"ok":bool,"note":string?}]3件以上(誤字/禁止表現/文字数・文字切れ/価格記載なし/出典 を含む),"issues":[string]}',
+      'qa_report: {"kind":"qa_report","result":"pass"|"fail"|"blocked_rights","checklist":[{"item":string,"ok":bool,"note":string?}]3件以上(誤字/禁止表現/文字数・文字切れ/価格記載なし/出典/権利 を含む),"issues":[string](公開を止める重大指摘。passと両立不可),"notes":[string](代表者確認が必要な軽微な指摘。passと両立可)}。実績素材の許可が未記録なら blocked_rights。禁止語・出典・整合性はシステムも通常コードで再検査する(自己申告に依存しない)',
   },
   {
     agentRef: "minato",

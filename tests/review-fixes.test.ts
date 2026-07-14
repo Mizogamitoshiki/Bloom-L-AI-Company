@@ -20,11 +20,11 @@ import {
   buildIdempotencyKey,
   getCompanyState,
 } from "@adapters/db/store";
-import { ulid, nowIso } from "@core/ids";
+import { ulid, nowIso, businessDate } from "@core/ids";
 
 let dir: string;
 let opened: OpenedDb;
-const DATE = "2026-07-13";
+const DATE = businessDate(); // 業務日(JST)。日付固定の回帰を避ける
 
 function makePost(id: string): void {
   opened.db
@@ -94,7 +94,7 @@ describe("1. 冪等キー(stepKey / postId)", () => {
   it("buildIdempotencyKeyは runDate/type/assignee/postId/stepKey をすべて含む", () => {
     const key = buildIdempotencyKey(
       { type: "qa", title: "x", assigneeId: "emp_shion", postId: "p1", stepKey: "qa", priority: 5 },
-      DATE,
+      "2026-07-13",
     );
     expect(key).toBe("2026-07-13:qa:emp_shion:p1:qa");
   });

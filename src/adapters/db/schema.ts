@@ -2,7 +2,7 @@
  * Drizzleスキーマ(docs/08)。V1で使用するテーブルの型付き定義。
  * docs/08にありV1未使用のテーブル(sources等)はclient.tsのDDLで先行作成する。
  */
-import { sqliteTable, text, integer, uniqueIndex, index } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex, index, primaryKey } from "drizzle-orm/sqlite-core";
 
 export const departments = sqliteTable("departments", {
   id: text("id").primaryKey(),
@@ -57,43 +57,121 @@ export const taskEvents = sqliteTable(
   (t) => [uniqueIndex("task_events_seq_uq").on(t.taskId, t.seq)],
 );
 
-export const artifacts = sqliteTable("artifacts", {
-  id: text("id").primaryKey(),
-  taskId: text("task_id").notNull().references(() => tasks.id),
-  postId: text("post_id"),
-  kind: text("kind").notNull(),
-  version: integer("version").notNull().default(1),
-  contentJson: text("content_json"),
-  filePath: text("file_path"),
-  schemaVersion: text("schema_version").notNull(),
-  createdAt: text("created_at").notNull(),
-});
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id").notNull().references(() => tasks.id),
+    postId: text("post_id"),
+    kind: text("kind").notNull(),
+    version: integer("version").notNull().default(1),
+    contentJson: text("content_json"),
+    filePath: text("file_path"),
+    schemaVersion: text("schema_version").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("artifacts_post_idx").on(t.postId, t.kind, t.version)],
+);
 
-export const posts = sqliteTable("posts", {
+export const posts = sqliteTable(
+  "posts",
+  {
+    id: text("id").primaryKey(),
+    pillar: text("pillar").notNull(),
+    format: text("format").notNull(),
+    title: text("title").notNull(),
+    status: text("status").notNull(),
+    plannedDate: text("planned_date"),
+    captionFinal: text("caption_final"),
+    hashtagsJson: text("hashtags_json"),
+    exportPath: text("export_path"),
+    publishedAt: text("published_at"),
+    publishMethod: text("publish_method").notNull().default("manual"),
+    rightsState: text("rights_state").notNull().default("n/a"),
+    templateId: text("template_id").notNull().default("tpl-howto"),
+    portfolioItemId: text("portfolio_item_id"),
+    createdAt: text("created_at"),
+  },
+  (t) => [
+    index("posts_status_idx").on(t.status),
+    index("posts_planned_idx").on(t.plannedDate),
+    index("posts_created_idx").on(t.createdAt),
+  ],
+);
+
+export const sources = sqliteTable("sources", {
   id: text("id").primaryKey(),
-  pillar: text("pillar").notNull(),
-  format: text("format").notNull(),
   title: text("title").notNull(),
-  status: text("status").notNull(),
-  plannedDate: text("planned_date"),
-  captionFinal: text("caption_final"),
-  hashtagsJson: text("hashtags_json"),
-  exportPath: text("export_path"),
-  publishedAt: text("published_at"),
-  publishMethod: text("publish_method").notNull().default("manual"),
-  rightsState: text("rights_state").notNull().default("n/a"),
+  url: text("url").notNull(),
+  publisher: text("publisher").notNull(),
+  publishedAt: text("published_at").notNull(), // 不明時は "" (verification_status=unconfirmed)
+  checkedAt: text("checked_at").notNull(),
+  isPrimary: integer("is_primary").notNull().default(0),
+  reliability: text("reliability").notNull(),
+  summary: text("summary"),
+  factOrInference: text("fact_or_inference").notNull(),
+  fetchedAt: text("fetched_at"),
+  usable: integer("usable").notNull().default(1),
+  verificationStatus: text("verification_status").notNull().default("confirmed"),
 });
 
-export const qaReviews = sqliteTable("qa_reviews", {
+// migration v3-fk-rebuild と同期: 複合PK+FK(P2)
+export const postSources = sqliteTable(
+  "post_sources",
+  {
+    postId: text("post_id").notNull().references(() => posts.id),
+    sourceId: text("source_id").notNull().references(() => sources.id),
+    citedAs: text("cited_as"),
+  },
+  (t) => [primaryKey({ columns: [t.postId, t.sourceId] })],
+);
+
+export const portfolioItems = sqliteTable(
+  "portfolio_items",
+  {
+    id: text("id").primaryKey(),
+    customerName: text("customer_name").notNull(),
+    siteUrl: text("site_url"),
+    assetsPath: text("assets_path"),
+    highlightsJson: text("highlights_json"),
+    permissionId: text("permission_id").references(() => customerPermissions.id),
+    createdAt: text("created_at").notNull(),
+    anonymousName: text("anonymous_name"),
+    summary: text("summary"),
+    technologiesJson: text("technologies_json"),
+    problem: text("problem"),
+    testimonial: text("testimonial"),
+  },
+  (t) => [index("portfolio_items_perm_idx").on(t.permissionId)],
+);
+
+export const customerPermissions = sqliteTable("customer_permissions", {
   id: text("id").primaryKey(),
-  postId: text("post_id").notNull(),
-  artifactId: text("artifact_id"),
-  result: text("result").notNull(), // pass | fail | blocked_rights(V3)
-  checklistJson: text("checklist_json"),
-  issuesJson: text("issues_json"),
-  reviewerId: text("reviewer_id").notNull(),
-  createdAt: text("created_at").notNull(),
+  customerName: text("customer_name").notNull(),
+  scopeJson: text("scope_json").notNull(),
+  status: text("status").notNull(), // pending | approved | rejected | revoked
+  evidencePath: text("evidence_path"),
+  grantedAt: text("granted_at"),
+  expiresAt: text("expires_at"),
+  anonymousAllowed: integer("anonymous_allowed").notNull().default(0),
+  revokedAt: text("revoked_at"),
 });
+
+export const qaReviews = sqliteTable(
+  "qa_reviews",
+  {
+    id: text("id").primaryKey(),
+    postId: text("post_id").notNull().references(() => posts.id),
+    artifactId: text("artifact_id").references(() => artifacts.id),
+    result: text("result").notNull(), // pass | fail | blocked_rights(V3)
+    checklistJson: text("checklist_json"),
+    issuesJson: text("issues_json"), // 重大指摘(公開を止める)
+    notesJson: text("notes_json"), // 軽微指摘(代表者確認・passと両立)
+    reviewerId: text("reviewer_id").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("qa_reviews_post_idx").on(t.postId, t.createdAt)],
+);
 
 export const approvals = sqliteTable("approvals", {
   id: text("id").primaryKey(),
@@ -137,4 +215,12 @@ export const usageRecords = sqliteTable("usage_records", {
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   valueJson: text("value_json").notNull(),
+});
+
+export const reports = sqliteTable("reports", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(), // daily | weekly | monthly
+  periodStart: text("period_start").notNull(),
+  periodEnd: text("period_end").notNull(),
+  bodyArtifactId: text("body_artifact_id").references(() => artifacts.id),
 });

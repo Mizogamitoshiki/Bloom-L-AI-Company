@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { businessDate } from "@core/ids";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -54,7 +55,7 @@ describe("createTask 冪等性(AC-3)", () => {
 
 describe("タスクライフサイクルとイベント", () => {
   it("start→heartbeat→submitで成果物が保存されタスクがdoneになる", () => {
-    const { task } = createTask(opened.db, SPEC, "2026-07-13");
+    const { task } = createTask(opened.db, SPEC, businessDate()); // getCompanyStateの当日判定に合わせる
     startTask(opened.db, task.id, "rin");
     heartbeat(opened.db, task.id, "情報源の確認", "rin");
     const r = submitArtifact(

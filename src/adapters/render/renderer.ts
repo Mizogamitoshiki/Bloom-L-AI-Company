@@ -11,13 +11,8 @@ import sharp from "sharp";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CarouselSpec } from "../../core/schemas";
-import {
-  buildPages,
-  enumerateSlots,
-  CANVAS,
-  type BrandColors,
-  type SatoriNode,
-} from "../../core/templates/tpl-howto";
+import { templateFor } from "../../core/templates/index";
+import { CANVAS, type BrandColors, type SatoriNode } from "../../core/templates/shared";
 import { loadFonts } from "./fonts";
 import { loadBrandTokens } from "../config";
 
@@ -54,11 +49,12 @@ function brandColors(): BrandColors {
 
 const svgHeightRe = /<svg[^>]*\bheight="([\d.]+)"/;
 
-/** スロット単位のSatori実測。heightを指定せず自動高さを取得して上限と比較する */
+/** スロット単位のSatori実測。heightを指定せず自動高さを取得して上限と比較する(全テンプレート共通) */
 export async function measureSlotOverflows(spec: CarouselSpec): Promise<SlotOverflow[]> {
   const fonts = loadFonts();
   const overflows: SlotOverflow[] = [];
-  for (const slot of enumerateSlots(spec)) {
+  const template = templateFor(spec.templateId);
+  for (const slot of template.enumerateSlots(spec)) {
     const node: SatoriNode = {
       type: "div",
       props: {
@@ -100,7 +96,11 @@ export async function renderCarousel(spec: CarouselSpec, outDir: string): Promis
 
   const fonts = loadFonts();
   const colors = brandColors();
-  const pages = buildPages(spec, colors);
+  const template = templateFor(spec.templateId);
+  const pages = template.buildPages(spec, colors);
+  if (pages.length !== template.expectedPages(spec)) {
+    throw new Error(`ページ数が期待値と不一致: ${pages.length} / ${template.expectedPages(spec)}`);
+  }
   mkdirSync(outDir, { recursive: true });
 
   const files: string[] = [];

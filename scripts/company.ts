@@ -22,10 +22,17 @@
  *   pnpm company render --post <id>           カルーセルPNG生成(文字あふれ検査込み・通常コード)
  *   pnpm company qa --task <id> --file <report.json>   QA提出(合格で承認キューへ)
  *   pnpm company queue                        承認キュー一覧JSON
+ *   pnpm company source-add --json '<source>' 情報源の登録(URL重複は既存を返す)
+ *   pnpm company source-list                  情報源一覧JSON
+ *   pnpm company source-link --post <id> --source <id>  投稿へ情報源を紐付け
+ *   pnpm company portfolio-list               実績一覧JSON(許可範囲でマスク済み。登録・許可変更はUIのみ)
+ *   pnpm company escalate --task <id> --stage <理由>     heavyモデル昇格の記録(日次上限あり)
+ *   pnpm company daily-report [--date YYYY-MM-DD]        日報の生成・保存(通常コード集計)
+ *   pnpm company doctor                       読み取り検査(旧形式spec・欠損ファイル等の検出。書き換えなし)
  *
- * 注意: 承認・却下・修正依頼のコマンドは存在しない。
- * 公開判断は代表者がNext.js UI(/approvals)から行う唯一の経路であり、
- * AI社員・オーケストレーターはこのCLIから承認操作を実行できない(P1指摘1, 2026-07-13)。
+ * 注意: 承認・却下・修正依頼、公開許可の記録・変更、生成停止の解除のコマンドは存在しない。
+ * これらは代表者がNext.js UIから行う唯一の経路であり、
+ * AI社員・オーケストレーターはこのCLIから実行できない(P1指摘1, V3-C/H)。
  */
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
@@ -48,10 +55,16 @@ import {
   setSetting,
   createPost,
   listApprovalQueue,
+  addSource,
+  linkSourceToPost,
+  listPortfolioForAi,
+  recordHeavyEscalation,
 } from "../src/adapters/db/store";
+import { buildDailyReport, doctorScan } from "../src/adapters/db/views";
+import * as t2 from "../src/adapters/db/schema";
 import { seedDemo } from "../src/adapters/db/demo";
-import { planCommitSchema, taskSpecSchema } from "../src/core/schemas";
-import { todayLocal } from "../src/core/ids";
+import { planCommitSchema, taskSpecSchema, sourceInputSchema, TEMPLATE_IDS } from "../src/core/schemas";
+import { todayLocal, ulid } from "../src/core/ids";
 import { renderPost } from "../src/adapters/render/render-post";
 import { OverflowError } from "../src/adapters/render/renderer";
 import { z } from "zod";
@@ -78,6 +91,7 @@ const { values: args } = parseArgs({
     task: { type: "string" },
     run: { type: "string" },
     post: { type: "string" },
+    source: { type: "string" },
     stage: { type: "string" },
     error: { type: "string" },
     actor: { type: "string", default: "system" },
@@ -95,6 +109,8 @@ const createPostInputSchema = z
     format: z.string().min(1).max(30),
     title: z.string().min(1).max(120),
     plannedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    templateId: z.enum(TEMPLATE_IDS).optional(),
+    portfolioItemId: z.string().optional(),
   })
   .strict();
 
@@ -230,6 +246,61 @@ try {
     }
     case "queue": {
       out(listApprovalQueue(db));
+      break;
+    }
+    case "source-add": {
+      if (!args.json) fail("--json '<source>' が必要です(title/url/publisher/publishedAt/factOrInference/reliability/summary)");
+      const input = sourceInputSchema.parse(JSON.parse(args.json));
+      const r = addSource(db, input, actor);
+      out({ ok: true, ...r, message: r.created ? "登録しました" : "同一URLが登録済みのため既存IDを返します" });
+      break;
+    }
+    case "source-list": {
+      out(db.select().from(t2.sources).all());
+      break;
+    }
+    case "source-link": {
+      if (!args.post || !args.source) fail("--post <id> --source <id> が必要です");
+      const r = linkSourceToPost(db, args.post, args.source, actor);
+      out({ ok: true, ...r });
+      break;
+    }
+    case "portfolio-list": {
+      // AIプロンプトへ渡す前提のビュー: 許可範囲外の顧客名・URL・声・素材はマスク済み(V3レビュー指摘1)
+      out(listPortfolioForAi(db));
+      break;
+    }
+    case "escalate": {
+      if (!args.task || !args.stage) fail("--task <id> --stage <昇格理由> が必要です");
+      const r = recordHeavyEscalation(db, args.task, args.stage, actor);
+      out({ ok: true, countToday: r.countToday, message: "heavy昇格を記録しました(上限内)" });
+      break;
+    }
+    case "daily-report": {
+      const date = args.date ?? todayLocal();
+      const report = buildDailyReport(db, date);
+      // 保存(冪等): 湊のreportタスク経由。既に保存済みなら再保存せず内容だけ返す
+      const { task, created } = createTask(
+        db,
+        { type: "report", title: `日報 ${date}`, assigneeId: "emp_minato", stepKey: `daily-report-${date}`, priority: 5 },
+        date,
+        actor,
+      );
+      let saved = false;
+      if (created || task.status === "queued") {
+        startTask(db, task.id, actor);
+        const r = submitArtifact(db, task.id, report, actor);
+        db.insert(t2.reports)
+          .values({ id: ulid(), kind: "daily", periodStart: date, periodEnd: date, bodyArtifactId: r.artifactId })
+          .run();
+        saved = true;
+      }
+      out({ ok: true, saved, report });
+      break;
+    }
+    case "doctor": {
+      const findings = doctorScan(db);
+      out({ ok: findings.filter((f) => f.level === "error").length === 0, findings });
       break;
     }
     default:
