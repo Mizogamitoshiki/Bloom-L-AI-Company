@@ -61,14 +61,24 @@ pnpm company render --post <postId>
 ```
 - 文字あふれで失敗した場合、琴葉への短縮タスクが自動生成される。手順3の要領で琴葉に短縮版を作らせ、submit後に再度renderする(短縮は1回まで。それでも失敗なら失敗として報告)
 
-### 5. QA(紫苑)
+### 5. QA(紫苑: 内容QA + 投稿画像の視覚QA)
 1. QAタスクを作成・開始:
 ```bash
 pnpm company create-task --json '{"type":"qa","title":"品質チェック: <題材>","assigneeId":"emp_shion","postId":"<postId>","stepKey":"qa-v<copyVersion>","priority":4}'
 pnpm company start --task <qaTaskId> --actor shion
 ```
-2. サブエージェント `shion` に投稿一式(copy JSON、レンダリング結果のファイル一覧、企画)を渡し、qa_report JSONを受け取る
-3. `pnpm company qa --task <qaTaskId> --file runs/<date>/qa.json --actor shion`
+2. サブエージェント `shion` に投稿一式(copy JSON、**実際に開いたレンダリング済みPNG全枚**、企画)を渡し、次の2つのJSONを受け取る。PNGを見られない場合はvisual_qaを`pass`にしてはならない。
+   - `qa_report` → `runs/<date>/qa.json`
+   - `visual_qa` → `runs/<date>/visual-qa.json`
+3. **先に視覚QAを記録する**:
+```bash
+pnpm company post-visual-qa --post <postId> --file runs/<date>/visual-qa.json --actor shion
+```
+   - `visual_qa.result=fail`の場合: `qa_report`も`fail`として提出し、投稿をdraftingへ差し戻す。承認キューには入れない。
+4. 視覚QAが`pass`の場合だけ、内容QAを提出する:
+```bash
+pnpm company qa --task <qaTaskId> --file runs/<date>/qa.json --actor shion
+```
    - pass → 投稿は承認キューへ / fail → draftingへ差し戻し(理由をサマリーに含める)
 
 ### 5b. ニュース投稿(tpl-news)を作る場合の追加手順(V3-B)

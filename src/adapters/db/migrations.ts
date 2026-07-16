@@ -393,6 +393,29 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // V5.2: 公開画像URLの記録(post_media_uploads)。export bundleの確定画像を
+    // 公開ストレージへアップロードした結果(順序・SHA-256・公開URL・provider)を保持する。
+    // 追加のみ(既存データ・既存ジョブは不変)。1トランザクション・再実行可能・FK整合。
+    id: 10,
+    name: "v52-post-media-uploads",
+    up(sqlite) {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS post_media_uploads (
+          id TEXT PRIMARY KEY,
+          post_id TEXT NOT NULL REFERENCES posts(id),
+          image_index INTEGER NOT NULL,
+          file_name TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          public_url TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          uploaded_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS post_media_uploads_post_idx_uq ON post_media_uploads(post_id, image_index);
+        CREATE INDEX IF NOT EXISTS post_media_uploads_sha_idx ON post_media_uploads(provider, sha256);
+      `);
+    },
+  },
 ];
 
 /**

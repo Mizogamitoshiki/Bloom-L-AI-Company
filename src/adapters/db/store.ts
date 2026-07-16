@@ -1211,6 +1211,13 @@ export function submitQa(db: Db, taskId: string, content: unknown, actor: string
       assertPublicTextSafety(tx, post, integrity.copy);
       // 権利: 実績投稿は許可記録がなければQA合格不可
       assertPortfolioRightsForPost(tx, post, integrity.spec);
+      // V5.1: 投稿ごとのPNGを実際に確認した紫苑の視覚QAがなければ、
+      // AIのqa_reportだけで承認キューに進めない。最新renderが対象なので、
+      // コピー修正・再レンダリング後には必ず再確認が必要になる。
+      const render = latestPostRender(tx, post.id);
+      if (!render || render.visualQaResult !== "pass") {
+        throw new Error("紫苑の視覚QA(visual QA)に合格していないためQA合格にできません。PNGを確認後、pnpm company post-visual-qa --post <postId> --file <visual-qa.json> --actor shion を実行してください");
+      }
     }
 
     const artifactId = insertContentArtifactIn(tx, task, report, actor);
@@ -1843,7 +1850,7 @@ export function getEmployeeDetail(db: Db, employeeId: string, now: Date = new Da
 // core/use-case層で再検査する(UI/CLIだけの判定にしない)。
 // ==========================================================================
 
-function latestQaPass(conn: DbConn, postId: string): boolean {
+export function latestQaPass(conn: DbConn, postId: string): boolean {
   const qa = conn.select().from(t.qaReviews).where(eq(t.qaReviews.postId, postId)).orderBy(desc(t.qaReviews.createdAt)).limit(1).get();
   return !!qa && qa.result === "pass";
 }
@@ -2083,6 +2090,10 @@ export interface PublishReadyItem {
   imageArtifactIds: string[];
   integrityError: string | null;
   metrics: { windowDays: number; measuredAt: string; hasData: boolean }[];
+  /** V5.2: 公開画像URLの準備状態(post_media_uploadsの件数。0=未準備) */
+  mediaUploadCount: number;
+  /** V5.2: 最後にdry-runを実行した日時(audit由来。なければnull) */
+  lastDryRunAt: string | null;
 }
 
 export function listPublishReady(db: Db): PublishReadyItem[] {
@@ -2111,6 +2122,17 @@ export function listPublishReady(db: Db): PublishReadyItem[] {
         measuredAt: m.measuredAt,
         hasData: [m.reach, m.profileViews, m.saves, m.shares, m.comments, m.dmStarts, m.followerCount].some((v) => v !== null),
       }));
+    const mediaUploadCount = db
+      .select({ n: sql<number>`count(*)` })
+      .from(t.postMediaUploads)
+      .where(eq(t.postMediaUploads.postId, post.id))
+      .get()?.n ?? 0;
+    const lastDryRun = db
+      .select({ ts: t.auditLog.ts })
+      .from(t.auditLog)
+      .where(and(eq(t.auditLog.subjectId, post.id), eq(t.auditLog.action, "instagram_dry_run_report")))
+      .orderBy(desc(t.auditLog.ts))
+      .get();
     return {
       id: post.id,
       title: post.title,
@@ -2120,6 +2142,8 @@ export function listPublishReady(db: Db): PublishReadyItem[] {
       imageArtifactIds,
       integrityError,
       metrics,
+      mediaUploadCount,
+      lastDryRunAt: lastDryRun?.ts ?? null,
     };
   });
 }

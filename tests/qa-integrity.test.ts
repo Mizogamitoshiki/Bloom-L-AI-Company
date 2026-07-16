@@ -19,7 +19,7 @@ import {
   decidePost,
 } from "@adapters/db/store";
 import { renderPost } from "@adapters/render/render-post";
-import { PLAN, COPY, QA_PASS } from "./fixtures";
+import { PLAN, COPY, QA_PASS, passPostRenderVisualQa } from "./fixtures";
 
 let dir: string;
 let imgDir: string;
@@ -96,13 +96,26 @@ describe("QA合格ゲート", () => {
     expect(() => submitQa(opened.db, qa, QA_PASS, "shion")).toThrow(/最新copy\(v2\)から生成された画像がありません/);
   }, 60_000);
 
-  it("5. 最新copyから再レンダリングすればQA passできる", async () => {
+  it("5. 最新copyから再レンダリングしても、視覚QA未実施ならQA passは拒否される", async () => {
     const postId = newPost();
     submitPlanFor(postId);
     submitCopyFor(postId);
     await renderPost(opened.db, postId, "system", { outDirBase: imgDir });
     submitCopyFor(postId, "copy-v2", "泉州で始めるHPの見せ方");
     await renderPost(opened.db, postId, "system", { outDirBase: imgDir }); // v2を再レンダリング
+    const qa = qaTaskFor(postId, "qa-2");
+    expect(() => submitQa(opened.db, qa, QA_PASS, "shion")).toThrow(/視覚QA/);
+    expect(opened.db.select().from(t.posts).where(eq(t.posts.id, postId)).get()!.status).toBe("drafting");
+  }, 60_000);
+
+  it("6. 最新copyから再レンダリングし、視覚QA合格後にQA passできる", async () => {
+    const postId = newPost();
+    submitPlanFor(postId);
+    submitCopyFor(postId);
+    await renderPost(opened.db, postId, "system", { outDirBase: imgDir });
+    submitCopyFor(postId, "copy-v2", "泉州で始めるHPの見せ方");
+    await renderPost(opened.db, postId, "system", { outDirBase: imgDir });
+    passPostRenderVisualQa(opened.db, postId);
     const qa = qaTaskFor(postId, "qa-2");
     const r = submitQa(opened.db, qa, QA_PASS, "shion");
     expect(r.result).toBe("pass");
@@ -130,6 +143,7 @@ describe("QA合格ゲート", () => {
     submitPlanFor(postId);
     submitCopyFor(postId);
     await renderPost(opened.db, postId, "system", { outDirBase: imgDir });
+    passPostRenderVisualQa(opened.db, postId);
     const qa = qaTaskFor(postId);
     submitQa(opened.db, qa, QA_PASS, "shion");
     // 承認待ち到達後にファイルを削除(バックアップ復元漏れ等の想定)

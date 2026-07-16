@@ -30,7 +30,7 @@ import { renderPost } from "@adapters/render/render-post";
 import { loadLimits } from "@adapters/config";
 import { normalizeHttpUrl, assertSafeHttpUrl } from "@core/urls";
 import { ulid, nowIso } from "@core/ids";
-import { PLAN, COPY, QA_PASS, PORTFOLIO_COPY, SOURCE_A , ensureEvidenceFile } from "./fixtures";
+import { PLAN, COPY, QA_PASS, PORTFOLIO_COPY, SOURCE_A, ensureEvidenceFile, passPostRenderVisualQa } from "./fixtures";
 
 let dir: string;
 let imgDir: string;
@@ -156,6 +156,7 @@ describe("1. 公開許可範囲の構造的強制", () => {
     startTask(opened.db, copyTask.id, "kotoha");
     submitArtifact(opened.db, copyTask.id, PORTFOLIO_COPY, "kotoha");
     await renderPost(opened.db, post.id, "system", { outDirBase: imgDir }); // 匿名名で画像生成
+    passPostRenderVisualQa(opened.db, post.id);
     submitQa(opened.db, qaTask(post.id), QA_PASS, "shion"); // awaiting_approval
 
     // 許可範囲を変更(実名許可へ)→ 旧画像は匿名名のままなので承認不可

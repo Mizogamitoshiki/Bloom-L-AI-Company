@@ -21,7 +21,7 @@ import {
   listApprovalQueue,
 } from "@adapters/db/store";
 import { renderPost } from "@adapters/render/render-post";
-import { PLAN, COPY, QA_PASS } from "./fixtures";
+import { PLAN, COPY, QA_PASS, passPostRenderVisualQa } from "./fixtures";
 
 let dir: string;
 let imgDir: string;
@@ -46,6 +46,8 @@ async function render(postId: string): Promise<void> {
 function runQa(postId: string, report: unknown, stepKey = "qa-v1"): string {
   const qaTask = createTask(opened.db, { type: "qa", title: "QA", assigneeId: "emp_shion", postId, stepKey, priority: 4 }, DATE).task;
   startTask(opened.db, qaTask.id, "shion");
+  // pass判定は、実運用どおりPNGの視覚QA記録が先に必要。
+  if ((report as { result?: string }).result === "pass") passPostRenderVisualQa(opened.db, postId);
   submitQa(opened.db, qaTask.id, report, "shion");
   return qaTask.id;
 }

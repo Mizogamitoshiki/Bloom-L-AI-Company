@@ -21,7 +21,7 @@ describe("7. AI向けcompany CLIから承認操作ができない", () => {
 
   it("`company decide` の実行は『不明なコマンド』で失敗する(実行検査)", () => {
     const r = spawnSync(
-      "node",
+      process.execPath,
       [
         "--import",
         "tsx",

@@ -20,10 +20,14 @@
  *   pnpm company events --task <id>           タスクのイベント一覧
  *   pnpm company create-post --json '<{pillar,format,title,plannedDate?}>'
  *   pnpm company render --post <id>           カルーセルPNG生成(文字あふれ検査込み・通常コード)
+ *   pnpm company post-visual-qa --post <id> --file <visual-qa.json>  紫苑の投稿画像視覚QAを記録
  *   pnpm company qa --task <id> --file <report.json>   QA提出(合格で承認キューへ)
  *   pnpm company queue                        承認キュー一覧JSON
  *   pnpm company export --post <id> --actor owner        承認済み投稿の書き出し(owner専用)
  *   pnpm company publish-record --post <id> --actor owner 投稿済み記録(owner専用)
+ *   pnpm company media-upload --post <id> --actor owner     公開画像をVercel Blobへ準備(owner専用・V5.2)
+ *   pnpm company instagram-dry-run --post <id> --actor owner Metaへ送信しない投稿前確認(owner専用・V5.2)
+ *   pnpm company instagram-readiness                        Instagram接続状態(秘密値なし)
  *   pnpm company source-add --json '<source>' 情報源の登録(URL重複は既存を返す)
  *   pnpm company source-list                  情報源一覧JSON
  *   pnpm company source-link --post <id> --source <id>  投稿へ情報源を紐付け
@@ -80,10 +84,15 @@ import {
   recordTemplateVisualQa,
   decideTemplateVersion,
   currentTemplateVersion,
+  latestPostRender,
+  attachPostRenderVisualQa,
   type TemplateDecision,
 } from "../src/adapters/db/store";
 import { buildDailyReport, buildPeriodReport, doctorScan } from "../src/adapters/db/views";
 import { createBackup, listBackups, restoreBackup } from "../src/adapters/backup/backup";
+import { uploadPostMedia } from "../src/adapters/instagram/media-upload";
+import { runInstagramDryRun, getInstagramReadiness } from "../src/adapters/instagram/publish";
+import { VercelBlobStorage } from "../src/adapters/storage/vercel-blob";
 import { generateTemplatePreviews, reconcileVisualQaInMeta } from "../src/adapters/render/preview";
 import { distinctInteriorPageCount, MIN_DISTINCT_INTERIOR_PAGES } from "../src/core/templates/distinctness";
 import { workspaceRoot } from "../src/adapters/root";
@@ -272,6 +281,19 @@ try {
       await renderCommand(args.post);
       break;
     }
+    case "post-visual-qa": {
+      // 投稿実体のPNGを紫苑が目視した結果を、最新のpost_renderへだけ紐付ける。
+      // テンプレートpreview用のtemplate-visual-qaとは別物であり、公開前には両方が必要。
+      if (!args.post || !args.file) fail("--post <id> --file <visual-qa.json> が必要です");
+      if (actor !== "shion") fail("投稿の視覚QAを記録できるのは紫苑(actor=shion)のみです");
+      const render = latestPostRender(db, args.post);
+      if (!render) fail(`post_renderが見つかりません: ${args.post}(先に pnpm company render --post ${args.post} を実行してください)`);
+      const visualQa: unknown = JSON.parse(readFileSync(args.file, "utf8"));
+      attachPostRenderVisualQa(db, render.id, visualQa, actor);
+      const saved = latestPostRender(db, args.post)!;
+      out({ ok: true, postId: args.post, postRenderId: saved.id, result: saved.visualQaResult });
+      break;
+    }
     case "qa": {
       if (!args.task || !args.file) fail("--task <id> --file <report.json> が必要です");
       const content: unknown = JSON.parse(readFileSync(args.file, "utf8"));
@@ -346,6 +368,37 @@ try {
       if (!args.post) fail("--post <id> が必要です");
       const r = recordPublish(db, args.post, actor);
       out({ ok: true, ...r, message: "投稿済みとして記録し、実績入力タスクを作成しました" });
+      break;
+    }
+    case "media-upload": {
+      // V5.2: export bundleの確定画像を公開ストレージ(Vercel Blob)へアップロード(owner専用)。
+      // actor未指定(system)をownerへ昇格させない。--actor owner の明示が必要。
+      if (!args.post) fail("--post <id> が必要です");
+      const r = await uploadPostMedia(db, args.post, actor);
+      out({
+        ok: true,
+        postId: r.postId,
+        provider: r.provider,
+        imageCount: r.images.length,
+        uploadedCount: r.uploadedCount,
+        reusedCount: r.reusedCount,
+        urls: r.images.map((i) => i.publicUrl),
+        message: `公開画像を準備しました(新規${r.uploadedCount}件・再利用${r.reusedCount}件)。Instagramへはまだ投稿されていません`,
+      });
+      break;
+    }
+    case "instagram-dry-run": {
+      // V5.2: Metaへ一切送信しないdry-run(owner専用)。META_PUBLISH_MODEは変更しない。
+      if (!args.post) fail("--post <id> が必要です");
+      const report = runInstagramDryRun(db, args.post, actor);
+      out({ ok: true, ...report });
+      break;
+    }
+    case "instagram-readiness": {
+      // V5.2: 秘密値を含まない接続状態(誰でも参照可)。ストレージ設定状態も表示する。
+      const readiness = getInstagramReadiness();
+      const storage = new VercelBlobStorage();
+      out({ ok: true, ...readiness, storageProvider: storage.provider, storageConfigured: storage.isConfigured() });
       break;
     }
     case "weekly-report": {

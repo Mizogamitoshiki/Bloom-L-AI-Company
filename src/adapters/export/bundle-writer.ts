@@ -3,10 +3,12 @@
  * 呼び出し側(store.exportPost)が一時ディレクトリへ書き、成功後に atomic rename する。
  * 秘密情報・許可範囲外の顧客情報は含めない(呼び出し側が権利検査済みの値のみ渡す)。
  */
-import { mkdirSync, writeFileSync, copyFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, copyFileSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
-export const BUNDLE_SCHEMA_VERSION = "export-v1";
+// V5.2: 画像ごとのSHA-256をmeta.jsonへ記録(公開アップロード時の改ざん検知に使う)
+export const BUNDLE_SCHEMA_VERSION = "export-v2";
 
 export interface BundleCaption {
   headline: string;
@@ -70,7 +72,7 @@ function checklistMd(data: BundleData, imageNames: string[]): string {
 `;
 }
 
-function metaJson(data: BundleData, imageNames: string[]): string {
+function metaJson(data: BundleData, imageNames: string[], imageSha256: Record<string, string>): string {
   return JSON.stringify(
     {
       schemaVersion: BUNDLE_SCHEMA_VERSION,
@@ -81,6 +83,7 @@ function metaJson(data: BundleData, imageNames: string[]): string {
       exportedAt: data.exportedAt,
       businessDate: data.businessDate,
       images: imageNames,
+      imageSha256,
       rightsState: data.rightsState,
       // source は公開に出す出典情報のみ(URL本文や秘密情報は含めない)
       sources: data.sources.map((s) => ({ publisher: s.publisher, title: s.title, publishedAt: s.publishedAt })),
@@ -94,13 +97,15 @@ function metaJson(data: BundleData, imageNames: string[]): string {
 export function writeBundleToDir(dir: string, data: BundleData): string[] {
   mkdirSync(dir, { recursive: true });
   const imageNames: string[] = [];
+  const imageSha256: Record<string, string> = {};
   data.imageFilePaths.forEach((src, i) => {
     const name = `${String(i + 1).padStart(2, "0")}.png`;
     copyFileSync(src, path.join(dir, name));
     imageNames.push(name);
+    imageSha256[name] = createHash("sha256").update(readFileSync(path.join(dir, name))).digest("hex");
   });
   writeFileSync(path.join(dir, "caption.txt"), captionText(data.caption));
   writeFileSync(path.join(dir, "checklist.md"), checklistMd(data, imageNames));
-  writeFileSync(path.join(dir, "meta.json"), metaJson(data, imageNames));
+  writeFileSync(path.join(dir, "meta.json"), metaJson(data, imageNames, imageSha256));
   return [...imageNames, "caption.txt", "checklist.md", "meta.json"];
 }

@@ -73,15 +73,15 @@ test.describe.serial("V4-F コア検収シナリオ", () => {
       startTask(opened.db, revision.id, "kotoha");
       submitArtifact(opened.db, revision.id, { ...E2E_COPY, headline: "修正版: HPがなくても始める見せ方" }, "kotoha");
       await renderPost(opened.db, post.id, "system");
+      // 実運用と同じ順序(V5.1): 再レンダリング後は紫苑の視覚QAに合格してから内容QAを提出する
+      const render = latestPostRender(opened.db, post.id);
+      if (render) attachPostRenderVisualQa(opened.db, render.id, KB_VISUAL_QA);
       const qa = createTask(opened.db, {
         type: "qa", title: `再QA ${E2E_REVISION_TITLE}`, assigneeId: "emp_shion", postId: post.id,
         stepKey: "qa-v2", priority: 4,
       }, businessDate()).task;
       startTask(opened.db, qa.id, "shion");
       submitQa(opened.db, qa.id, E2E_QA_PASS, "shion");
-      // 再レンダリングで新しいpost_renderができるため、視覚QA(紫苑相当)を紐付け直す(exportゲートを満たす)
-      const render = latestPostRender(opened.db, post.id);
-      if (render) attachPostRenderVisualQa(opened.db, render.id, KB_VISUAL_QA);
     } finally {
       opened.sqlite.close();
     }

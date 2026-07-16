@@ -355,3 +355,23 @@ export const instagramPublishJobs = sqliteTable(
     index("instagram_publish_jobs_post_idx").on(t.postId, t.createdAt),
   ],
 );
+
+// V5.2: 公開画像URLの記録。export bundleの確定画像を公開ストレージへ配置した結果。
+// トークン等の秘密値は保存しない(publicUrlは検証済みの公開HTTPS URLのみ)。
+export const postMediaUploads = sqliteTable(
+  "post_media_uploads",
+  {
+    id: text("id").primaryKey(),
+    postId: text("post_id").notNull().references(() => posts.id),
+    imageIndex: integer("image_index").notNull(), // 0始まりの投稿順
+    fileName: text("file_name").notNull(), // 01.png 等
+    sha256: text("sha256").notNull(),
+    publicUrl: text("public_url").notNull(),
+    provider: text("provider").notNull(), // vercel-blob 等
+    uploadedAt: text("uploaded_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("post_media_uploads_post_idx_uq").on(t.postId, t.imageIndex),
+    index("post_media_uploads_sha_idx").on(t.provider, t.sha256),
+  ],
+);

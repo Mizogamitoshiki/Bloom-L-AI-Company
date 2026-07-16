@@ -45,11 +45,11 @@ async function makeRenderedApproved(title = "ガードテスト"): Promise<strin
   startTask(opened.db, copy.id, "kotoha");
   submitArtifact(opened.db, copy.id, COPY, "kotoha");
   await renderPost(opened.db, post.id, "system", { outDirBase: path.join(ws, "05_generated-posts") });
+  passPostRenderVisualQa(opened.db, post.id); // 実運用では内容QAより先に紫苑がPNGを確認する
   const qa = createTask(opened.db, { type: "qa", title: "QA", assigneeId: "emp_shion", postId: post.id, stepKey: "qa", priority: 4 }, DATE).task;
   startTask(opened.db, qa.id, "shion");
   submitQa(opened.db, qa.id, QA_PASS, "shion");
   decidePost(opened.db, post.id, "approved", null, "owner");
-  passPostRenderVisualQa(opened.db, post.id); // 実運用ではpost_renderに紫苑の視覚QAが紐付く
   return post.id;
 }
 

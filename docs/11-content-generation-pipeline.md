@@ -51,7 +51,9 @@ const HowtoBodySlot = z.object({
 
 ### 3.4 視覚QA(第三層・AI)
 - 紫苑が生成PNGを読み取り、チェック: 文字切れ・不自然な改行・ロゴ欠け・誤字(画像上)・視認性
-- 判定はqa_reviewsのchecklist_jsonに項目別記録
+- 判定は最新の`post_renders.visual_qa_json`に項目別記録する。PNGを実際に確認できない場合は`pass`にしてはならない
+- `visual_qa.result=pass`を記録してから内容QAを`pass`にできる。どちらかが未実施・failなら承認キュー・書き出しへ進めない
+- 記録コマンド: `pnpm company post-visual-qa --post <postId> --file <visual-qa.json> --actor shion`
 
 ## 4. フォント・素材
 

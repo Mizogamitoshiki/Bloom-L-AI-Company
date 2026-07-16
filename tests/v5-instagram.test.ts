@@ -72,10 +72,10 @@ describe("V5 Instagram公開統合", () => {
     const copy = createTask(opened.db, { type: "write_copy", title: "コピー", assigneeId: "emp_kotoha", postId, stepKey: "copy", priority: 5 }, "2026-07-15").task;
     startTask(opened.db, copy.id, "kotoha"); submitArtifact(opened.db, copy.id, COPY, "kotoha");
     await renderPost(opened.db, postId, "system", { outDirBase: path.join(ws, "05_generated-posts") });
+    passPostRenderVisualQa(opened.db, postId);
     const qa = createTask(opened.db, { type: "qa", title: "QA", assigneeId: "emp_shion", postId, stepKey: "qa", priority: 4 }, "2026-07-15").task;
     startTask(opened.db, qa.id, "shion"); submitQa(opened.db, qa.id, QA_PASS, "shion");
     decidePost(opened.db, postId, "approved", null, "owner");
-    passPostRenderVisualQa(opened.db, postId);
     approveTemplate(opened.db, "tpl-howto");
     exportPost(opened.db, postId, "owner");
   }, 60_000);

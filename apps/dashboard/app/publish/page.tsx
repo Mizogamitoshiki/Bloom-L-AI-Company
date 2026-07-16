@@ -31,6 +31,16 @@ interface InstagramReadiness {
   liveReady: boolean;
   externalSendEnabled: boolean;
   missing: string[];
+  storageProvider: string;
+  storageConfigured: boolean;
+}
+interface DryRunReport {
+  plan?: { imageCount?: number; allHttps?: boolean; mediaUrls?: string[] };
+  caption?: { length?: number; preview?: string };
+  template?: { templateId?: string; version?: number; approved?: boolean } | null;
+  qa?: { contentQaPass?: boolean; visualQaResult?: string | null; designQaResult?: string | null };
+  graphApiVersion?: string;
+  note?: string;
 }
 const EMPTY_METRIC: MetricForm = { reach: "", profileViews: "", saves: "", shares: "", comments: "", dmStarts: "", followerCount: "", note: "" };
 
@@ -43,6 +53,7 @@ export default function PublishPage(): JSX.Element {
   const [metricFor, setMetricFor] = useState<{ postId: string; window: 3 | 7 } | null>(null);
   const [metricForm, setMetricForm] = useState<MetricForm>(EMPTY_METRIC);
   const [instagram, setInstagram] = useState<InstagramReadiness | null>(null);
+  const [dryRunResult, setDryRunResult] = useState<{ postId: string; report: DryRunReport } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -114,6 +125,48 @@ export default function PublishPage(): JSX.Element {
     }
   }
 
+  /** V5.2: 公開画像の準備(Vercel Blobへアップロード)。owner専用・Metaへは送信しない */
+  async function prepareMedia(postId: string): Promise<void> {
+    setBusy(postId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/posts/${postId}/media-upload`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
+      });
+      const json: unknown = await res.json();
+      if (!res.ok) throw new Error((json as { error?: string }).error ?? "公開画像の準備に失敗しました");
+      const r = json as { imageCount?: number; uploadedCount?: number; reusedCount?: number };
+      setNotice(`公開画像を準備しました(${r.imageCount ?? 0}枚: 新規${r.uploadedCount ?? 0}・再利用${r.reusedCount ?? 0})。Instagramにはまだ投稿されていません。`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** V5.2: dry-run実行。Metaへ一切送信せず投稿予定内容だけを確認する */
+  async function runDryRun(postId: string): Promise<void> {
+    setBusy(postId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/posts/${postId}/instagram-dry-run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
+      });
+      const json: unknown = await res.json();
+      if (!res.ok) throw new Error((json as { error?: string }).error ?? "dry-runに失敗しました");
+      setDryRunResult({ postId, report: json as DryRunReport });
+      setNotice("dry-runが完了しました。Instagramにはまだ投稿されていません(Meta APIへは送信していません)。");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function saveMetric(postId: string, window: 3 | 7): Promise<void> {
     setBusy(postId);
     setError(null);
@@ -164,9 +217,37 @@ export default function PublishPage(): JSX.Element {
             </span>
           </div>
           <div className="card__body" style={{ display: "grid", gap: 8 }}>
+            {instagram.mode !== "live" ? (
+              <p role="note" style={{ margin: 0, padding: "8px 10px", background: "var(--color-warning-soft)", border: "1px solid var(--color-warning)", borderRadius: 8, fontSize: 13, fontWeight: 700 }}>
+                実投稿は無効です(META_PUBLISH_MODE={instagram.mode})。公開画像の準備・dry-runを実行しても、Instagramにはまだ投稿されていません。
+              </p>
+            ) : null}
             <p style={{ margin: 0, fontSize: 13 }}>
               API {instagram.apiVersion}。既定は無効で、実投稿は環境設定・公開画像URL・代表者の確認がすべて揃った場合だけ実行されます。手動投稿は常に利用できます。
             </p>
+            <dl style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, fontSize: 12.5, margin: 0 }}>
+              <div style={{ background: "var(--color-surface-muted)", padding: 8, borderRadius: 6 }}>
+                <dt style={{ color: "var(--color-text-muted)" }}>モード</dt>
+                <dd style={{ margin: 0, fontWeight: 700 }}>{instagram.mode}</dd>
+              </div>
+              <div style={{ background: "var(--color-surface-muted)", padding: 8, borderRadius: 6 }}>
+                <dt style={{ color: "var(--color-text-muted)" }}>InstagramユーザーID</dt>
+                <dd style={{ margin: 0, fontWeight: 700 }}>{instagram.accountConfigured ? "設定済み" : "未設定"}</dd>
+              </div>
+              <div style={{ background: "var(--color-surface-muted)", padding: 8, borderRadius: 6 }}>
+                <dt style={{ color: "var(--color-text-muted)" }}>アクセストークン</dt>
+                <dd style={{ margin: 0, fontWeight: 700 }}>{instagram.tokenConfigured ? "設定済み" : "未設定"}</dd>
+              </div>
+              <div style={{ background: "var(--color-surface-muted)", padding: 8, borderRadius: 6 }}>
+                <dt style={{ color: "var(--color-text-muted)" }}>公開ストレージ({instagram.storageProvider})</dt>
+                <dd style={{ margin: 0, fontWeight: 700 }}>{instagram.storageConfigured ? "設定済み" : "未設定"}</dd>
+              </div>
+            </dl>
+            {!instagram.storageConfigured ? (
+              <p style={{ margin: 0, fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                公開ストレージ未設定: Vercelダッシュボード → Storage → Blob でトークンを発行し、.env に BLOB_READ_WRITE_TOKEN を設定してください(値はここに表示されません)。
+              </p>
+            ) : null}
             {instagram.missing.length > 0 ? (
               <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
                 {instagram.missing.map((item) => <li key={item}>{item}</li>)}
@@ -216,7 +297,29 @@ export default function PublishPage(): JSX.Element {
                   <p style={{ fontSize: 13, margin: 0 }}>
                     書き出し先: <code>{it.exportPath}</code> — このフォルダの画像と caption.txt / checklist.md を使い、代表者がInstagramへ手動投稿してください。
                   </p>
+                  <p style={{ fontSize: 12.5, margin: 0, color: "var(--color-text-muted)" }}>
+                    公開画像URL: <strong>{it.mediaUploadCount > 0 ? `準備済み(${it.mediaUploadCount}枚)` : "未準備"}</strong>
+                    {" ・ "}dry-run: <strong>{it.lastDryRunAt ? `実行済み(${new Date(it.lastDryRunAt).toLocaleString("ja-JP")})` : "未実行"}</strong>
+                    {" — Instagramにはまだ投稿されていません"}
+                  </p>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="btn btn--secondary"
+                      disabled={busy === it.id || !instagram?.storageConfigured}
+                      title={!instagram?.storageConfigured ? "BLOB_READ_WRITE_TOKEN が未設定です" : undefined}
+                      onClick={() => void prepareMedia(it.id)}
+                    >
+                      公開画像を準備(Vercel Blob)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--secondary"
+                      disabled={busy === it.id}
+                      onClick={() => void runDryRun(it.id)}
+                    >
+                      dry-runを実行(Metaへ送信しない)
+                    </button>
                     {instagram && instagram.mode !== "disabled" ? (
                       <button
                         type="button"
@@ -231,6 +334,22 @@ export default function PublishPage(): JSX.Element {
                       手動投稿済みとして記録
                     </button>
                   </div>
+
+                  {dryRunResult && dryRunResult.postId === it.id ? (
+                    <div role="region" aria-label="dry-run結果" style={{ border: "1px solid var(--color-border)", borderRadius: 8, padding: 12, fontSize: 12.5, display: "grid", gap: 6 }}>
+                      <strong>dry-run結果(Instagramにはまだ投稿されていません)</strong>
+                      <span>画像: {dryRunResult.report.plan?.imageCount ?? 0}枚 / 全URL HTTPS: {dryRunResult.report.plan?.allHttps ? "はい" : "いいえ"}</span>
+                      <span>キャプション: {dryRunResult.report.caption?.length ?? 0}文字 — {dryRunResult.report.caption?.preview ?? ""}…</span>
+                      <span>
+                        テンプレート: {dryRunResult.report.template ? `${dryRunResult.report.template.templateId} v${dryRunResult.report.template.version}(${dryRunResult.report.template.approved ? "承認済み" : "未承認"})` : "-"}
+                        {" / "}Graph API: {dryRunResult.report.graphApiVersion}
+                      </span>
+                      <span>
+                        内容QA: {dryRunResult.report.qa?.contentQaPass ? "合格" : "未合格"} / 視覚QA: {dryRunResult.report.qa?.visualQaResult ?? "-"} / design QA: {dryRunResult.report.qa?.designQaResult ?? "-"}
+                      </span>
+                      <span style={{ color: "var(--color-text-muted)" }}>{dryRunResult.report.note}</span>
+                    </div>
+                  ) : null}
                 </>
               ) : null}
 

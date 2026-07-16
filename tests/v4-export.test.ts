@@ -55,12 +55,13 @@ async function makeApprovedPost(title = "書き出しテスト"): Promise<string
   startTask(opened.db, copyTask.id, "kotoha");
   submitArtifact(opened.db, copyTask.id, COPY, "kotoha");
   await renderPost(opened.db, post.id, "system", { outDirBase: path.join(ws, "05_generated-posts") });
+  // 実運用と同じ順序: PNGの視覚QAに合格してから内容QAを提出する。
+  passPostRenderVisualQa(opened.db, post.id);
   const qaTask = createTask(opened.db, { type: "qa", title: "QA", assigneeId: "emp_shion", postId: post.id, stepKey: "qa", priority: 4 }, DATE).task;
   startTask(opened.db, qaTask.id, "shion");
   submitQa(opened.db, qaTask.id, QA_PASS, "shion");
   decidePost(opened.db, post.id, "approved", null, "owner");
-  // V4.5 v2: 公開停止ガードを満たす。post_renderに視覚QA、テンプレート版は全variantQAを揃えて承認
-  passPostRenderVisualQa(opened.db, post.id);
+  // テンプレート版は全variantQAを揃えて代表者が承認する。
   approveTemplate(opened.db, "tpl-howto");
   return post.id;
 }

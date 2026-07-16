@@ -99,6 +99,7 @@ pnpm company doctor   # 読み取りのみ。DBは書き換えない
 | 症状 | 対応 |
 |---|---|
 | 承認画面で投稿が「要修復」になり承認できない | 整合性が崩れている(再レンダリング+再QAが必要)。他の投稿の承認は通常どおり可。`/kickoff` で修復タスクが回る |
+| 「紫苑の視覚QAに合格していないため書き出せません」 | PNG全枚を紫苑が確認していない安全停止。`/kickoff` を再実行し、`visual_qa.json` を先に記録してから内容QAを提出する。画像を確認できない場合は書き出さない |
 | 書き出しフォルダが見つからない(doctorがwarn) | `pnpm company export --post <id>` で再書き出し |
 | 「新規生成は停止中」表示 | 承認待ちが多い等の安全停止。承認を消化し、ダッシュボードから代表者が再開(解除は代表者のみ) |
 | 失敗タスクが残る | リトライ上限2回で failed。詳細パネルから再開可能。原因はエラー文言に記録 |
@@ -131,3 +132,14 @@ pnpm company doctor   # 読み取りのみ。DBは書き換えない
 - 受け入れ基準と検証結果: [20-acceptance-criteria.md](20-acceptance-criteria.md)
 - 引き継ぎ・不変条件の詳細: [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md)
 - 素材ライセンス: [assets-license.md](assets-license.md)
+
+---
+
+## 8. V5.2 公開画像URLとdry-run(実投稿はしない)
+
+- Instagram公式APIの実投稿は **無効(META_PUBLISH_MODE=disabled)のまま**。手動投稿の運用は §1 のとおり変わらない
+- 公式API投稿の準備として、次の2つがowner専用で使える(どちらもInstagramへは投稿しない):
+  1. `pnpm company media-upload --post <id> --actor owner` — export bundleの確定画像をVercel Blobの公開HTTPS URLへ配置(要 BLOB_READ_WRITE_TOKEN)
+  2. `pnpm company instagram-dry-run --post <id> --actor owner` — Metaへ送信せず投稿予定内容(画像順・caption・QA・テンプレ版)だけを確認
+- /publish 画面でも「公開画像を準備」「dry-runを実行」ボタンから同じ操作ができる(トークン値は表示されない)
+- 詳細・設定手順・障害時の停止方法は docs/25 §V5.2 を参照

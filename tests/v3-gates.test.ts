@@ -28,7 +28,7 @@ import {
 import { buildDailyReport, doctorScan } from "@adapters/db/views";
 import { businessDate } from "@core/ids";
 import { renderPost, RightsError } from "@adapters/render/render-post";
-import { PLAN, COPY, QA_PASS, SOURCE_A , ensureEvidenceFile } from "./fixtures";
+import { PLAN, COPY, QA_PASS, SOURCE_A, ensureEvidenceFile, passPostRenderVisualQa } from "./fixtures";
 
 let dir: string;
 let imgDir: string;
@@ -66,6 +66,8 @@ function makeHowtoPost(overrides: { title?: string; pillar?: "1" | "3" | "6"; co
 function qaTask(postId: string, stepKey = "qa"): string {
   const task = createTask(opened.db, { type: "qa", title: "QA", assigneeId: "emp_shion", postId, stepKey, priority: 4 }, DATE).task;
   startTask(opened.db, task.id, "shion");
+  // 各ケースはレンダリング後に呼び出す。通常QAの前に視覚QAが済んだ状態を再現する。
+  passPostRenderVisualQa(opened.db, postId);
   return task.id;
 }
 

@@ -116,12 +116,12 @@ async function seedApprovalPost(db: Db, ws: string, title: string, date: string,
   startTask(db, copyTask.id, "kotoha");
   submitArtifact(db, copyTask.id, E2E_COPY, "kotoha");
   await renderPost(db, post.id, "system", { outDirBase: path.join(ws, "05_generated-posts") });
+  // 実運用と同じ順序(V5.1): 紫苑の視覚QA(PNG確認)に合格してから内容QAを提出する
+  const render = latestPostRender(db, post.id);
+  if (render) attachPostRenderVisualQa(db, render.id, E2E_VISUAL_QA);
   const qaTask = createTask(db, { type: "qa", title: `QA ${title}`, assigneeId: "emp_shion", postId: post.id, stepKey: `qa-${suffix}`, priority: 4 }, date).task;
   startTask(db, qaTask.id, "shion");
   submitQa(db, qaTask.id, E2E_QA_PASS, "shion");
-  // 実運用ではpost_renderに紫苑の視覚QAが紐付く(exportゲートを満たす)
-  const render = latestPostRender(db, post.id);
-  if (render) attachPostRenderVisualQa(db, render.id, E2E_VISUAL_QA);
 }
 
 export async function seedE2E(): Promise<void> {

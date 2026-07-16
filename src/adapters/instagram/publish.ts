@@ -19,6 +19,9 @@ import {
   type InstagramPublicConfig,
 } from "./config";
 import { MetaApiError, MetaInstagramClient, type InstagramPublishPlan, type MetaPublishResult } from "./meta-client";
+import { listPostMediaUploads } from "./media-upload";
+import { assertSafePublicMediaUrl } from "../storage/media-storage";
+import { latestPostRender, latestQaPass, getTemplateVersion } from "../db/store";
 
 interface ExportMeta { postId?: string; images?: unknown }
 
@@ -58,8 +61,13 @@ function encodePath(parts: string[]): string {
 
 export function buildInstagramPostPlan(db: Db, postId: string, config: InstagramConfig): InstagramPostPlan {
   const ready = assertPostReadyForExternalPublish(db, postId);
-  if (!config.mediaBaseUrl || !/^https:\/\//.test(config.mediaBaseUrl)) {
-    throw new Error("公開画像URLが未設定です(META_MEDIA_BASE_URL に公開HTTPS URLを設定してください)");
+  // V5.2: 公開ストレージへアップロード済みのURL(post_media_uploads)があればそれを優先する。
+  // 無い場合のみ META_MEDIA_BASE_URL による静的ホスティング前提のURL構築へフォールバックする。
+  const uploaded = listPostMediaUploads(db, postId);
+  if (uploaded.length === 0 && (!config.mediaBaseUrl || !/^https:\/\//.test(config.mediaBaseUrl))) {
+    throw new Error(
+      "公開画像URLが未準備です。pnpm company media-upload --post <id> --actor owner で公開画像を準備するか、META_MEDIA_BASE_URL を設定してください",
+    );
   }
 
   const rel = ready.exportPath.replace(/^data\/workspace\//, "");
@@ -89,8 +97,22 @@ export function buildInstagramPostPlan(db: Db, postId: string, config: Instagram
   const caption = readFileSync(captionPath, "utf8").trim();
   if (!caption || caption.length > 2_200) throw new Error("キャプションは1〜2,200文字である必要があります");
 
-  const bundleName = path.basename(bundleDir);
-  const mediaUrls = images.map((name) => `${config.mediaBaseUrl}/${encodePath([bundleName, name])}`);
+  let mediaUrls: string[];
+  if (uploaded.length > 0) {
+    // アップロード記録の完全性: 枚数一致・順序連番・全URLがHTTPSであること
+    if (uploaded.length !== images.length) {
+      throw new Error(`公開画像URLの記録(${uploaded.length}件)がbundleの画像枚数(${images.length}枚)と一致しません。media-uploadを再実行してください`);
+    }
+    mediaUrls = uploaded.map((row, i) => {
+      if (row.imageIndex !== i) throw new Error("公開画像URLの順序記録が壊れています。media-uploadを再実行してください");
+      assertSafePublicMediaUrl(row.publicUrl);
+      return row.publicUrl;
+    });
+  } else {
+    const bundleName = path.basename(bundleDir);
+    mediaUrls = images.map((name) => `${config.mediaBaseUrl}/${encodePath([bundleName, name])}`);
+    mediaUrls.forEach((url) => assertSafePublicMediaUrl(url));
+  }
   const material = JSON.stringify({ postId, mediaUrls, caption });
   const digest = createHash("sha256").update(material).digest("hex");
   return {
@@ -223,4 +245,123 @@ export async function publishInstagramPost(
 
 export function latestInstagramJob(db: Db, postId: string): typeof t.instagramPublishJobs.$inferSelect | null {
   return db.select().from(t.instagramPublishJobs).where(and(eq(t.instagramPublishJobs.postId, postId))).orderBy(desc(t.instagramPublishJobs.createdAt)).get() ?? null;
+}
+
+// ---------- V5.2 dry-run(Metaへ一切送信しない投稿前確認) ----------
+
+export interface InstagramDryRunReport {
+  kind: "instagram_dry_run";
+  mode: "dry_run";
+  apiCalled: false; // Metaへメディア作成・公開リクエストを送っていないことの明示
+  postId: string;
+  postTitle: string;
+  publishMode: string; // 現在のMETA_PUBLISH_MODE(参考表示。dry-run実行自体はこれを変更しない)
+  graphApiVersion: string;
+  igUserIdConfigured: boolean;
+  accessTokenConfigured: boolean;
+  plan: {
+    kind: "image" | "carousel";
+    imageCount: number;
+    mediaUrls: string[]; // 検証済みの公開HTTPS URLのみ(トークン等は含まれない)
+    allHttps: boolean;
+    metaFetchable: boolean; // 公開HTTPS・localhost/危険スキームなし
+  };
+  caption: { length: number; preview: string };
+  cta: string | null;
+  template: { templateId: string; version: number; fingerprintPrefix: string; approved: boolean } | null;
+  qa: { contentQaPass: boolean; visualQaResult: string | null; designQaResult: string | null };
+  rightsState: string;
+  executedAt: string;
+  note: string;
+}
+
+/**
+ * Instagram投稿のdry-run(owner専用)。Metaへメディア作成・投稿・公開リクエストを一切送らず、
+ * 投稿予定内容と前提条件だけを検証して監査ログへ記録する。何度実行しても投稿されない。
+ * 秘密値(アクセストークン・Blobトークン・Authorization)はレポートにも監査ログにも含めない。
+ */
+export function runInstagramDryRun(
+  db: Db,
+  postId: string,
+  actor: string,
+  deps: { env?: NodeJS.ProcessEnv } = {},
+): InstagramDryRunReport {
+  if (actor !== "owner") throw new Error("Instagram dry-runは代表者(owner)のみ実行できます");
+  const env = deps.env ?? process.env;
+  const config = loadInstagramConfig(env);
+
+  // 計画構築(§5安全ゲート込み)。live処理・Meta client生成は行わない
+  const plan = buildInstagramPostPlan(db, postId, config);
+  plan.mediaUrls.forEach((url) => assertSafePublicMediaUrl(url));
+
+  const post = db.select().from(t.posts).where(eq(t.posts.id, postId)).get();
+  const render = latestPostRender(db, postId);
+  const tv = render ? getTemplateVersion(db, render.templateId, render.templateVersion) : undefined;
+  const copyRow = db
+    .select({ contentJson: t.artifacts.contentJson })
+    .from(t.artifacts)
+    .where(and(eq(t.artifacts.postId, postId), eq(t.artifacts.kind, "copy")))
+    .orderBy(desc(t.artifacts.createdAt))
+    .get();
+  let cta: string | null = null;
+  try {
+    cta = copyRow?.contentJson ? ((JSON.parse(copyRow.contentJson) as { cta?: string }).cta ?? null) : null;
+  } catch {
+    cta = null;
+  }
+
+  const report: InstagramDryRunReport = {
+    kind: "instagram_dry_run",
+    mode: "dry_run",
+    apiCalled: false,
+    postId,
+    postTitle: post?.title ?? "",
+    publishMode: config.mode,
+    graphApiVersion: config.apiVersion,
+    igUserIdConfigured: /^\d+$/.test(config.igUserId),
+    accessTokenConfigured: config.accessToken.length > 0,
+    plan: {
+      kind: plan.kind,
+      imageCount: plan.mediaUrls.length,
+      mediaUrls: plan.mediaUrls,
+      allHttps: plan.mediaUrls.every((url) => url.startsWith("https://")),
+      metaFetchable: true, // assertSafePublicMediaUrl通過済み(公開HTTPS・危険スキームなし)
+    },
+    caption: { length: plan.caption.length, preview: plan.caption.slice(0, 120) },
+    cta,
+    template: render
+      ? {
+          templateId: render.templateId,
+          version: render.templateVersion,
+          fingerprintPrefix: render.fingerprint.slice(0, 16),
+          approved: tv?.status === "approved",
+        }
+      : null,
+    qa: {
+      contentQaPass: latestQaPass(db, postId),
+      visualQaResult: render?.visualQaResult ?? null,
+      designQaResult: render?.designQaResult ?? null,
+    },
+    rightsState: post?.rightsState ?? "n/a",
+    executedAt: nowIso(),
+    note: "dry-runです。Instagramへは投稿されていません(Meta APIへのリクエストは送信していません)",
+  };
+
+  // 監査ログ(トークン・Authorization・秘密情報は含めない)
+  db.transaction((tx) => {
+    audit(tx, actor, "instagram_dry_run_report", "post", postId, {
+      imageCount: report.plan.imageCount,
+      kind: report.plan.kind,
+      allHttps: report.plan.allHttps,
+      captionLength: report.caption.length,
+      template: report.template ? `${report.template.templateId}:v${report.template.version}` : null,
+      contentQaPass: report.qa.contentQaPass,
+      visualQaResult: report.qa.visualQaResult,
+      designQaResult: report.qa.designQaResult,
+      publishMode: report.publishMode,
+      apiCalled: false,
+    });
+  });
+
+  return report;
 }
