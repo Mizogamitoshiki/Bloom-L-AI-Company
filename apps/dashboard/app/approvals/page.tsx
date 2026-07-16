@@ -59,14 +59,14 @@ export default function ApprovalsPage(): JSX.Element {
     try {
       const res = await fetch(`/api/posts/${selected.post.id}/decision`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
         body: JSON.stringify({ action, comment: comment.trim() || undefined }),
       });
       const json: unknown = await res.json();
       if (!res.ok) throw new Error((json as { error?: string }).error ?? "操作に失敗しました");
       setNotice(
         action === "approve"
-          ? "承認しました(書き出しはV3で実装予定)"
+          ? "承認しました。公開準備画面で書き出し(export)できます。"
           : action === "reject"
             ? "却下しました(理由は監査ログに記録)"
             : "修正依頼を登録しました(琴葉の修正タスクを自動生成)",

@@ -51,6 +51,10 @@ describe("マイグレーション", () => {
     // 検索インデックス
     const postIdx = (sqlite.pragma("index_list(posts)") as { name: string }[]).map((i) => i.name);
     expect(postIdx).toEqual(expect.arrayContaining(["posts_status_idx", "posts_planned_idx", "posts_created_idx"]));
+    const metricIdx = (sqlite.pragma("index_list(post_metrics)") as { name: string; unique: number }[]);
+    expect(metricIdx).toEqual(expect.arrayContaining([expect.objectContaining({ name: "post_metrics_post_window_uq", unique: 1 })]));
+    const meetingIdx = (sqlite.pragma("index_list(meetings)") as { name: string; unique: number }[]);
+    expect(meetingIdx).toEqual(expect.arrayContaining([expect.objectContaining({ name: "meetings_kind_period_uq", unique: 1 })]));
     sqlite.close();
   });
 

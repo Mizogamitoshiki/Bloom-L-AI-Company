@@ -22,12 +22,22 @@
  *   pnpm company render --post <id>           カルーセルPNG生成(文字あふれ検査込み・通常コード)
  *   pnpm company qa --task <id> --file <report.json>   QA提出(合格で承認キューへ)
  *   pnpm company queue                        承認キュー一覧JSON
+ *   pnpm company export --post <id> --actor owner        承認済み投稿の書き出し(owner専用)
+ *   pnpm company publish-record --post <id> --actor owner 投稿済み記録(owner専用)
  *   pnpm company source-add --json '<source>' 情報源の登録(URL重複は既存を返す)
  *   pnpm company source-list                  情報源一覧JSON
  *   pnpm company source-link --post <id> --source <id>  投稿へ情報源を紐付け
  *   pnpm company portfolio-list               実績一覧JSON(許可範囲でマスク済み。登録・許可変更はUIのみ)
  *   pnpm company escalate --task <id> --stage <理由>     heavyモデル昇格の記録(日次上限あり)
  *   pnpm company daily-report [--date YYYY-MM-DD]        日報の生成・保存(通常コード集計)
+ *   pnpm company weekly-report [--date YYYY-MM-DD]       週報(通常コード集計。10本未満は断定しない)
+ *   pnpm company monthly-report [--date YYYY-MM-DD]      月報(通常コード集計)
+ *   pnpm company meeting-save --file <minutes.json>      週次/月次会議の議事録保存(meeting_minutes)
+ *   pnpm company export --post <id>           承認済み投稿の書き出し(owner専用。整合性・QA・権利を再検査)
+ *   pnpm company publish-record --post <id>   投稿済み記録(owner専用。3日/7日後の実績入力タスク作成)
+ *   pnpm company backup [--date YYYY-MM-DD]   整合スナップショット+workspace+manifest(SHA-256)。14世代
+ *   pnpm company backup-list                  バックアップ一覧(整合性checksum付き)
+ *   pnpm company restore --from YYYY-MM-DD     バックアップから復元(checksum検証→doctor→atomic置換)
  *   pnpm company doctor                       読み取り検査(旧形式spec・欠損ファイル等の検出。書き換えなし)
  *
  * 注意: 承認・却下・修正依頼、公開許可の記録・変更、生成停止の解除のコマンドは存在しない。
@@ -59,8 +69,26 @@ import {
   linkSourceToPost,
   listPortfolioForAi,
   recordHeavyEscalation,
+  exportPost,
+  recordPublish,
+  saveMeeting,
+  registerAllTemplateVersions,
+  registerAllTemplateVersionsAt,
+  listTemplateVersions,
+  listTemplateVariantQa,
+  upsertTemplateVariantQa,
+  recordTemplateVisualQa,
+  decideTemplateVersion,
+  currentTemplateVersion,
+  type TemplateDecision,
 } from "../src/adapters/db/store";
-import { buildDailyReport, doctorScan } from "../src/adapters/db/views";
+import { buildDailyReport, buildPeriodReport, doctorScan } from "../src/adapters/db/views";
+import { createBackup, listBackups, restoreBackup } from "../src/adapters/backup/backup";
+import { generateTemplatePreviews, reconcileVisualQaInMeta } from "../src/adapters/render/preview";
+import { distinctInteriorPageCount, MIN_DISTINCT_INTERIOR_PAGES } from "../src/core/templates/distinctness";
+import { workspaceRoot } from "../src/adapters/root";
+import path from "node:path";
+import { weekRange, monthRange } from "../src/core/ids";
 import * as t2 from "../src/adapters/db/schema";
 import { seedDemo } from "../src/adapters/db/demo";
 import { planCommitSchema, taskSpecSchema, sourceInputSchema, TEMPLATE_IDS } from "../src/core/schemas";
@@ -96,11 +124,18 @@ const { values: args } = parseArgs({
     error: { type: "string" },
     actor: { type: "string", default: "system" },
     date: { type: "string" },
+    from: { type: "string" },
+    all: { type: "boolean", default: false },
+    template: { type: "string" },
+    version: { type: "string" },
+    decision: { type: "string" },
+    note: { type: "string" },
   },
   strict: true,
 });
 
-const { db } = openDb();
+const opened = openDb();
+const { db, sqlite } = opened;
 const actor = args.actor ?? "system";
 
 const createPostInputSchema = z
@@ -296,6 +331,136 @@ try {
         saved = true;
       }
       out({ ok: true, saved, report });
+      break;
+    }
+    case "export": {
+      // V4-B: 承認済み投稿の書き出し(owner専用)。整合性・QA・権利を再検査して bundle 生成
+      if (!args.post) fail("--post <id> が必要です");
+      // actor未指定(system)をownerへ昇格させない。代表者が --actor owner を明示した場合だけ通る。
+      const r = exportPost(db, args.post, actor);
+      out({ ok: true, ...r, message: r.skipped ? "既に書き出し済み(冪等)" : `書き出しました: ${r.exportPath}` });
+      break;
+    }
+    case "publish-record": {
+      // V4-B: 投稿済み記録(owner専用)。3日/7日後の実績入力タスクを自動作成
+      if (!args.post) fail("--post <id> が必要です");
+      const r = recordPublish(db, args.post, actor);
+      out({ ok: true, ...r, message: "投稿済みとして記録し、実績入力タスクを作成しました" });
+      break;
+    }
+    case "weekly-report": {
+      // V4-C: 週報(通常コード集計)。--date で週を指定(既定は本日を含む週)
+      const ref = args.date ?? todayLocal();
+      const { start, end } = weekRange(ref);
+      out({ ok: true, report: buildPeriodReport(db, "weekly", start, end) });
+      break;
+    }
+    case "monthly-report": {
+      const ref = args.date ?? todayLocal();
+      const { start, end } = monthRange(ref);
+      out({ ok: true, report: buildPeriodReport(db, "monthly", start, end) });
+      break;
+    }
+    case "meeting-save": {
+      // V4-C: 週次/月次会議の議事録保存(オーケストレーターが weekly-review skill 経由で実行)
+      if (!args.file) fail("--file <minutes.json> が必要です");
+      const content: unknown = JSON.parse(readFileSync(args.file, "utf8"));
+      const r = saveMeeting(db, content, actor);
+      out({ ok: true, ...r, message: "議事録を保存しました" });
+      break;
+    }
+    case "backup": {
+      // V4-E: 整合スナップショット(VACUUM INTO)+ workspace + manifest(SHA-256)。14世代保持
+      const date = args.date ?? todayLocal();
+      const { dir, manifest } = createBackup(date);
+      out({ ok: true, dir, dbSha256: manifest.dbSha256, dbBytes: manifest.dbBytes, workspaceIncluded: manifest.workspaceIncluded, message: `バックアップを作成しました: ${dir}` });
+      break;
+    }
+    case "backup-list": {
+      const backups = listBackups();
+      out({ ok: true, count: backups.length, backups });
+      break;
+    }
+    case "restore": {
+      // V4-E: checksum検証 → 一時領域で doctor 検証 → atomic置換。復元前に現DBを自動バックアップ
+      if (!args.from) fail("--from <YYYY-MM-DD> が必要です。pnpm company backup-list で候補を確認してください");
+      // 現在の接続を閉じ、復元後は再度開いて doctor を出す
+      const result = restoreBackup(args.from, {
+        closeCurrent: () => sqlite.close(),
+        verify: (testDb) => doctorScan(testDb),
+      });
+      const reopened = openDb();
+      const findings = doctorScan(reopened.db).filter((f) => f.level === "error");
+      reopened.sqlite.close();
+      out({ ok: findings.length === 0, ...result, message: `${result.restoredFrom} から復元しました(復元前バックアップ: ${result.preRestoreBackup || "なし"})`, remainingErrors: findings });
+      break;
+    }
+    case "template-preview": {
+      // V4.5 v2: 4系統×全variantのゴールデンプレビューを生成(draft登録。自己承認はしない)
+      if (!args.all) fail("--all が必要です(4系統すべてを生成)");
+      const previewVersion = args.version ? Number(args.version) : 1;
+      const versions = registerAllTemplateVersionsAt(db, previewVersion, actor);
+      const statusOf = (templateId: string): string =>
+        versions.find((v) => v.templateId === templateId)?.status ?? "draft";
+      const outRoot = path.join(workspaceRoot(), "06_template-previews");
+      const metas = await generateTemplatePreviews(outRoot, { version: previewVersion, statusOf });
+      // variantごとのcontent/mechanical QA・プレビュー完了・fingerprint・fixture種別・権利・layoutId/画像hashを保存
+      for (const m of metas) {
+        upsertTemplateVariantQa(db, {
+          templateId: m.templateId, version: m.version, variant: m.variant, fingerprint: m.fingerprint,
+          contentQaResult: m.contentQa.result, mechanicalQaResult: m.designQa.result,
+          previewComplete: true, pageCount: m.pageCount, fixtureKind: m.fixtureKind, rights: m.rights,
+          layoutIds: m.layoutIds, pageHashes: m.pageHashes,
+        }, actor);
+      }
+      // family別のvariant差分(01〜05で3ページ以上異なるか)
+      const families = [...new Set(metas.map((m) => m.templateId))].map((id) => {
+        const vs = metas.filter((m) => m.templateId === id);
+        const n = vs.length === 2 ? distinctInteriorPageCount({ layoutIds: vs[0]!.layoutIds, pageHashes: vs[0]!.pageHashes }, { layoutIds: vs[1]!.layoutIds, pageHashes: vs[1]!.pageHashes }) : 0;
+        return { templateId: id, distinctInteriorPages: n, distinctOk: n >= MIN_DISTINCT_INTERIOR_PAGES };
+      });
+      out({
+        ok: metas.every((m) => m.designQa.result === "pass" && m.contentQa.result === "pass") && families.every((f) => f.distinctOk),
+        version: previewVersion, outRoot, overview: path.join(outRoot, "overview.png"),
+        comparison: previewVersion >= 3 ? path.join(outRoot, "v2-v3-comparison.png") : undefined,
+        families,
+        previews: metas.map((m) => ({
+          templateId: m.templateId, family: m.family, version: m.version, variant: m.variant,
+          fingerprint: m.fingerprint, pageCount: m.pageCount, status: m.status, fixtureKind: m.fixtureKind,
+          contentQa: m.contentQa.result, designQa: m.designQa.result, layoutIds: m.layoutIds,
+          dir: path.join(outRoot, m.templateId, `v${m.version}`, m.variant),
+        })),
+        note: "テンプレートは自己承認していません。visual QA(紫苑)は未実施。http://localhost:3000/templates で全variantを確認し、代表者が承認してください。",
+      });
+      break;
+    }
+    case "template-list": {
+      out({ ok: true, templates: listTemplateVersions(db), variantQa: args.template ? listTemplateVariantQa(db, args.template, args.version ? Number(args.version) : currentTemplateVersion(db, args.template)) : undefined });
+      break;
+    }
+    case "template-visual-qa": {
+      // V4.5 v3: 紫苑の視覚QA結果を記録(Zod検証・fail closed)。DBとmeta.jsonの両方へ反映(整合)
+      if (!args.file) fail("--file <visual-qa.json>(templateId/version/variant/visualQa の配列)が必要です");
+      const entries = JSON.parse(readFileSync(args.file, "utf8")) as { templateId: string; version: number; variant: string; visualQa: unknown }[];
+      const outRoot = path.join(workspaceRoot(), "06_template-previews");
+      const recorded = entries.map((e) => {
+        const r = recordTemplateVisualQa(db, e, actor === "system" ? "shion" : actor);
+        reconcileVisualQaInMeta(outRoot, e.templateId, e.version, e.variant, e.visualQa); // meta.json ↔ DB 整合
+        return { templateId: e.templateId, version: e.version, variant: e.variant, result: r.visualQaResult };
+      });
+      out({ ok: true, recorded });
+      break;
+    }
+    case "template-decide": {
+      // V4.5: テンプレート版の承認/却下/修正依頼(owner専用)。CLIからは基本使わず、UI経由を推奨
+      if (!args.template) fail("--template <id> が必要です");
+      if (!args.decision) fail("--decision <approved|rejected|revision_requested> が必要です");
+      const decision = args.decision as TemplateDecision;
+      if (!["approved", "rejected", "revision_requested"].includes(decision)) fail("不正な--decision");
+      const version = args.version ? Number(args.version) : currentTemplateVersion(db, args.template);
+      // actor未指定(system)をownerへ昇格させない。代表者が --actor owner を明示した場合だけ通る(UI経由を推奨)
+      const row = decideTemplateVersion(db, { templateId: args.template, version, decision, note: args.note }, actor);
+      out({ ok: true, template: row });
       break;
     }
     case "doctor": {

@@ -23,7 +23,8 @@ describe("7. AI向けcompany CLIから承認操作ができない", () => {
     const r = spawnSync(
       "node",
       [
-        path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+        "--import",
+        "tsx",
         path.join(root, "scripts", "company.ts"),
         "decide",
         "--post",
@@ -47,5 +48,9 @@ describe("7. AI向けcompany CLIから承認操作ができない", () => {
         expect(toolsLine).not.toContain("Bash");
       }
     }
+  });
+
+  it("actor未指定のsystemをownerへ自動昇格しない", () => {
+    expect(cliSource).not.toMatch(/args\.actor\s*===\s*["']system["']\s*\?\s*["']owner["']/);
   });
 });

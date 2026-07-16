@@ -42,7 +42,7 @@
 7. モデル名は `config/model-profiles.yaml` のみ。コード・エージェント定義への直書き禁止(生成スクリプト経由)
 8. AIを呼ばない領域(レンダリング・集計・検証・マスキング等)にAI呼び出しを追加しない
 9. デモデータは実データと分離し、デモ中は全画面にバナー表示
-10. 未確認の外部API・機能(Meta API等)を前提にした実装をしない。アダプターinterfaceまで
+10. 外部APIは公式仕様だけを使用し、未設定時はfail-closedにする。V5のMetaアダプターは既定`disabled`、秘密値は環境変数のみ、AI社員/CLIに公開権限を与えない
 11. **DM支援(S-07・陽葵の起動・dm_items書き込み)はMVPで実装しない**(第2段階)。dm_itemsスキーマ定義とマスキング設計は将来用に維持してよいが、UI・エージェント経路を作らない
 12. 竹プランの価格(120,000円/月12,000円)は**社内検証用の仮価格**。生成コンテンツ(投稿・キャプション)に竹プランの具体価格を出力しない(QA禁止語チェックに含める)
 
@@ -78,3 +78,29 @@ V3(本格QA・sources・実績/権利・tpl-news/portfolio・S-04/05/06・日報
 15. スキーマ変更は `src/adapters/db/migrations.ts` にバージョン付きmigrationとして追加する(DDL直改変やその場ALTERをしない)。破壊的変更はprecheckで孤立・重複を検査し、勝手に削除せず日本語で停止する
 16. source/顧客URLは `normalizeHttpUrl`(http/httpsのみ・正規化)を必ず通す
 17. ブランド素材は `01_brand/brand-manifest.json`(brandManifestSchema)経由で読み込む。コードへの色・パス直書き禁止
+
+## V4追補(2026-07-14 実装済み — MVP仕上げ)
+
+V4(書き出しbundle・投稿済み記録・実績入力・週報/月報・議事録/週次会議・設定S-10・バックアップ/復元/doctor拡張・E2E+axe・秘密情報スキャン・運用手順書)を実装。検証結果は `20-acceptance-criteria.md §K`。DM支援は引き続き第2段階(未実装)。追加/再確認した不変条件:
+
+18. 公開経路は「QA合格 → 代表者承認 → **export(tmp生成→atomic rename→DBトランザクション、失敗時は補償削除)** → 人間の手動投稿 → published記録」。export/publish-record/metric入力/設定変更は **owner専用**(actorガード)。エージェント用CLIに承認・公開権限のコマンドを追加しない
+19. 数値集計・権利判定・承認判定・ファイル整合性判定は **AIに委ねず通常コード**で行う。週報/月報は決定的集計(`buildPeriodReport`)、投稿10本未満は統計的断定をしない(`dataNote`)
+20. 書き出し先は業務日(JST)基準の `05_generated-posts/<YYYY-MM-DD>_<postId>/`。exportは冪等(既出力なら再生成しない)。`meta.json` に顧客情報・秘密情報を含めない(rightsStateのみ)
+21. バックアップは整合スナップショット(`VACUUM INTO`)+workspace+全ファイルSHA-256 manifest(`backup-v2`)、14世代。同日再作成は一時世代の完成後に差し替え、失敗時は旧世代を保持する。復元は **全ファイル検証 → 現DB/workspace自動バックアップ → 一時領域でopen/migration/foreign_key_check/doctor → DB/workspaceをロールバック可能な手順で置換**。検証・置換失敗時は現状態を保全する。`backup-v1`は読み取り互換のみ維持
+22. テスト/E2Eは実DB・実backups・実workspaceを触らない。隔離用env: `BLOOM_DB_PATH` / `BLOOM_WORKSPACE_PATH` / `BLOOM_BACKUP_PATH`。E2E(`playwright.config.ts`)は `.e2e-tmp/` と専用ポートで完結
+
+## V5追補(2026-07-15 実装済み — Instagram公式API公開基盤)
+
+23. 現在のV4.6オフィスデザインを確定版として維持し、V5では公開準備画面に接続状態と公開操作だけを追加する
+24. Instagram実投稿は`owner`専用。`approved → export`を経た投稿に対して、最新QA・権利・テンプレートfingerprintを公開直前に再検査する
+25. Meta認証情報は`.env`のみ。DB、監査ログ、API応答、UIへ値を保存・表示しない
+26. 投稿ジョブは冪等キーで一意化する。通信結果が曖昧な失敗は`needs_reconciliation`で停止し、自動再試行しない
+27. `META_PUBLISH_MODE`は`disabled`を既定とし、`dry_run`は外部通信ゼロ、`live`は公開HTTPS画像URLと代表者の最終確認を必須にする
+23. 秘密情報は `pnpm check:secrets`(git管理下を走査)で継続検査。ブランドの success 色は AA(4.5:1)を満たす濃さ(`#157a41`)を使う
+
+## V4再監査追補(2026-07-15)
+
+24. owner専用POST APIはactor文字列だけを信用せず、UIが付ける確認ヘッダー・same-origin `Origin`・`Sec-Fetch-Site`を共通境界で検査する。ローカル単一利用のCSRF/誤操作防止であり、クラウド移行時はログイン/セッション認証へ置換する
+25. CLIの`system`を`owner`へ自動昇格しない。export/publish-recordは代表者が`--actor owner`を明示する。議事録の`decisions`もownerだけが確定でき、AIは提案をagendaへ残す
+26. `post_metrics(post_id, window_days)`と`meetings(kind, period_end)`はmigration #5の一意制約で重複を防止する。週報/月報は投稿IDを重複計上せず、同一投稿の3日/7日実績を累積加算せず最新スナップショットを採用する
+27. E2E seedはデモseedに依存せず、権利ブロック・修正再制作・承認・実export・published記録・キーボード操作・reduced-motionを一時DB/workspaceで実行する

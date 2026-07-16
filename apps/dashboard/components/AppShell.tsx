@@ -3,10 +3,13 @@ import { useEffect, useRef, useState, type JSX, type ReactNode } from "react";
 import {
   IconHome,
   IconStamp,
+  IconExport,
   IconKanban,
   IconCalendar,
   IconImage,
   IconReport,
+  IconMeeting,
+  IconTemplate,
   IconSettings,
   IconBell,
   IconQuestion,
@@ -24,10 +27,13 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/", label: "オフィス", Icon: IconHome },
   { href: "/approvals", label: "承認", Icon: IconStamp },
+  { href: "/publish", label: "公開準備", Icon: IconExport },
   { href: "/pipeline", label: "投稿パイプライン", Icon: IconKanban },
   { href: "/calendar", label: "カレンダー", Icon: IconCalendar },
   { href: "/portfolio", label: "実績素材", Icon: IconImage },
   { href: "/reports", label: "日報", Icon: IconReport },
+  { href: "/meetings", label: "会議", Icon: IconMeeting },
+  { href: "/templates", label: "テンプレート", Icon: IconTemplate },
 ];
 
 /** ロゴ(正式ブランド画像。/api/brand/logo から配信、コード変更なしで差し替え可能) */

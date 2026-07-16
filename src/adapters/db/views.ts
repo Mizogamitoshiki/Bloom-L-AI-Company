@@ -4,6 +4,7 @@
  */
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import type { Db } from "./client";
 import * as t from "./schema";
 import {
@@ -16,7 +17,10 @@ import {
   type CompanyStateView,
 } from "./store";
 import { loadLimits, brandStatus } from "../config";
-import { carouselSpecSchema, type ReportArtifact } from "../../core/schemas";
+import { workspaceRoot } from "../root";
+import { listBackups } from "../backup/backup";
+import { carouselSpecSchema, permissionScopeSchema, type ReportArtifact } from "../../core/schemas";
+import { resolvePortfolioAssetFile, PortfolioMediaError } from "../render/portfolio-media";
 import { todayLocal, businessDate } from "../../core/ids";
 import { EMPLOYEES } from "../../core/org";
 
@@ -282,6 +286,41 @@ export function doctorScan(db: Db): DoctorFinding[] {
     }
   }
 
+  // V4.5: 登録済み実績画像の安全パス・hash再検査(読み取りのみ)
+  const portfolioItems = db.select().from(t.portfolioItems).all();
+  for (const item of portfolioItems) {
+    if (item.assetsPath) {
+      try {
+        resolvePortfolioAssetFile(item.id, item.assetsPath);
+      } catch (error) {
+        findings.push({
+          level: "error",
+          subject: `portfolio ${item.id}`,
+          message: `実績画像を安全に確認できません: ${error instanceof PortfolioMediaError ? error.message : String(error)}`,
+          fix: "/portfolio からPNG/JPEG/WebPを再アップロードし、該当投稿を再レンダリングしてください",
+        });
+      }
+    }
+    const permission = item.permissionId
+      ? db.select().from(t.customerPermissions).where(eq(t.customerPermissions.id, item.permissionId)).get()
+      : undefined;
+    let rawScope: unknown = {};
+    try {
+      rawScope = permission?.scopeJson ? JSON.parse(permission.scopeJson) : {};
+    } catch {
+      rawScope = {};
+    }
+    const scope = permissionScopeSchema.safeParse(rawScope);
+    if (permission?.status === "approved" && scope.success && scope.data.screenshot && !item.assetsPath) {
+      findings.push({
+        level: "warn",
+        subject: `portfolio ${item.id}`,
+        message: "画面キャプチャは許可済みですが、実績画像が未登録です",
+        fix: "/portfolio からHP画面キャプチャをアップロードしてください",
+      });
+    }
+  }
+
   const pause = getGenerationPause(db);
   if (pause) {
     findings.push({
@@ -305,6 +344,82 @@ export function doctorScan(db: Db): DoctorFinding[] {
   const demoMode = getSetting<boolean>(db, "demo_mode");
   if (demoMode) {
     findings.push({ level: "warn", subject: "demo", message: "デモモードで動作中です", fix: "実運用は pnpm company init" });
+  }
+
+  // V4: 外部キー整合(DBレベル)
+  const fkViolations = (db.all(sql`PRAGMA foreign_key_check`) as unknown[]).length;
+  if (fkViolations > 0) {
+    findings.push({
+      level: "error",
+      subject: "database",
+      message: `外部キー違反が${fkViolations}件あります`,
+      fix: "破損の可能性があります。pnpm company restore --from <日付> でバックアップから復元してください",
+    });
+  }
+
+  // V4: exported投稿の書き出しフォルダ・meta.jsonの実在
+  const exportedPosts = db.select().from(t.posts).where(inArray(t.posts.status, ["exported", "published", "measured"])).all();
+  for (const p of exportedPosts) {
+    if (!p.exportPath) {
+      findings.push({ level: "warn", subject: `post ${p.id}`, message: `「${p.title}」は${p.status}ですが書き出し先が記録されていません`, fix: "pnpm company export --post <id> --actor owner で再書き出ししてください" });
+      continue;
+    }
+    const abs = path.join(workspaceRoot(), p.exportPath.replace(/^data\/workspace\//, ""));
+    if (!existsSync(path.join(abs, "meta.json"))) {
+      findings.push({ level: "warn", subject: `post ${p.id}`, message: `書き出しフォルダが見つかりません: ${p.exportPath}`, fix: "pnpm company export --post <id> --actor owner で再書き出ししてください" });
+    }
+  }
+
+  // V5: Instagram公開ジョブの整合。曖昧な外部結果は自動修復せず代表者確認を求める。
+  const instagramJobs = db.select().from(t.instagramPublishJobs).all();
+  for (const job of instagramJobs) {
+    if (job.status === "needs_reconciliation" || job.status === "publishing") {
+      findings.push({
+        level: "error",
+        subject: `instagram job ${job.id}`,
+        message: "Instagram公開結果が未確定です。二重投稿防止のため自動再試行は停止されています",
+        fix: "Instagramアプリで対象投稿の公開有無を確認し、実装者へジョブIDを伝えてください",
+      });
+    }
+    if (["remote_published", "published"].includes(job.status) && !job.instagramMediaId) {
+      findings.push({
+        level: "error",
+        subject: `instagram job ${job.id}`,
+        message: "公開済み状態ですがInstagramメディアIDがありません",
+        fix: "Instagram側と監査ログを照合し、バックアップを保全した上で修復してください",
+      });
+    }
+    const serialized = `${job.errorMessage ?? ""} ${job.mediaUrlsJson}`;
+    if (/EA[A-Za-z0-9]{80,}/.test(serialized)) {
+      findings.push({
+        level: "error",
+        subject: `instagram job ${job.id}`,
+        message: "公開ジョブにMetaアクセストークンらしき値が混入しています",
+        fix: "公開処理を停止し、トークンを失効・再発行してから秘密情報を安全に除去してください",
+      });
+    }
+  }
+
+  // V4: meetings.minutes_artifact_id / reports.body_artifact_id の参照
+  const orphanMeetings = db
+    .select({ id: t.meetings.id, aid: t.meetings.minutesArtifactId })
+    .from(t.meetings)
+    .all()
+    .filter((m) => m.aid && !db.select({ id: t.artifacts.id }).from(t.artifacts).where(eq(t.artifacts.id, m.aid!)).get());
+  for (const m of orphanMeetings) {
+    findings.push({ level: "warn", subject: `meeting ${m.id}`, message: "議事録成果物への参照が壊れています", fix: "pnpm company meeting-save で再保存してください" });
+  }
+
+  // V4: バックアップの有無・整合(read-only)
+  try {
+    const backups = listBackups();
+    if (backups.length === 0) {
+      findings.push({ level: "warn", subject: "backup", message: "バックアップがまだありません", fix: "pnpm company backup を実行(kickoff終了時にも自動作成されます)" });
+    } else if (!backups[0]!.valid) {
+      findings.push({ level: "error", subject: "backup", message: `最新バックアップ(${backups[0]!.date})のSHA-256が一致しません`, fix: "破損の可能性。別の世代から復元するか、pnpm company backup で作り直してください" });
+    }
+  } catch {
+    // listBackups失敗は致命ではない
   }
 
   return findings;
@@ -439,4 +554,175 @@ export function homeView(db: Db, now: Date = new Date()): HomeView {
     approvals,
     todayResults,
   };
+}
+
+// ---------- V4-C: 週報/月報(通常コードで決定的集計。AIに数値計算させない) ----------
+
+const PILLAR_NAME: Record<string, string> = {
+  "1": "IT・AIニュース", "2": "HPの役割", "3": "HPで変わる", "4": "Web・ITトピック", "5": "制作実績", "6": "泉州課題解決",
+};
+
+/** 期間レポート(weekly/monthly)。JST業務日 [start,end] を集計。投稿10本未満は統計的断定をしない */
+export function buildPeriodReport(db: Db, kind: "weekly" | "monthly", start: string, end: string): ReportArtifact {
+  const inPeriod = sql`created_at >= ${start} AND created_at <= ${end}`;
+  const postsCreated = db.select().from(t.posts).where(inPeriod).all();
+  // 公開(published_at の JST日付が期間内)
+  const publishedPosts = db
+    .select({ id: t.posts.id })
+    .from(t.posts)
+    .where(sql`published_at IS NOT NULL AND date(published_at, '+9 hours') >= ${start} AND date(published_at, '+9 hours') <= ${end}`)
+    .all();
+  // 承認判断(decidedAt の JST日付が期間内)
+  const decisions = db
+    .select({ decision: t.approvals.decision, n: sql<number>`count(*)` })
+    .from(t.approvals)
+    .where(sql`date(decided_at, '+9 hours') >= ${start} AND date(decided_at, '+9 hours') <= ${end}`)
+    .groupBy(t.approvals.decision)
+    .all();
+  const dcount = (d: string) => decisions.find((x) => x.decision === d)?.n ?? 0;
+  const approved = dcount("approved");
+  const rejected = dcount("rejected");
+  const revision = dcount("revision_requested");
+  const decidedTotal = approved + rejected + revision;
+  // タスク失敗率(runDate 期間内)
+  const taskAgg = db
+    .select({ status: t.tasks.status, n: sql<number>`count(*)` })
+    .from(t.tasks)
+    .where(sql`run_date >= ${start} AND run_date <= ${end}`)
+    .groupBy(t.tasks.status)
+    .all();
+  const tcount = (s: string) => taskAgg.find((x) => x.status === s)?.n ?? 0;
+  const tasksTotal = taskAgg.reduce((a, x) => a + x.n, 0);
+  const tasksFailed = tcount("failed");
+  // 推定利用量(JST日付が期間内)
+  const usage = db
+    .select({ chars: sql<number>`coalesce(sum(est_output_chars),0)` })
+    .from(t.usageRecords)
+    .where(sql`date(ts, '+9 hours') >= ${start} AND date(ts, '+9 hours') <= ${end}`)
+    .get();
+  // 期間内に公開された投稿の入力済みSNS指標(未入力は集計から除外)
+  const metricRows = db
+    .select({
+      postId: t.postMetrics.postId,
+      windowDays: t.postMetrics.windowDays,
+      measuredAt: t.postMetrics.measuredAt,
+      reach: t.postMetrics.reach,
+      saves: t.postMetrics.saves,
+      profileViews: t.postMetrics.profileViews,
+      dmStarts: t.postMetrics.dmStarts,
+    })
+    .from(t.postMetrics)
+    .innerJoin(t.posts, eq(t.postMetrics.postId, t.posts.id))
+    .where(sql`posts.published_at IS NOT NULL AND date(posts.published_at, '+9 hours') >= ${start} AND date(posts.published_at, '+9 hours') <= ${end}`)
+    .orderBy(desc(t.postMetrics.windowDays), desc(t.postMetrics.measuredAt))
+    .all();
+  // 3日/7日は累積スナップショットなので加算しない。投稿ごとの最新(7日優先)だけを期間合計へ使う。
+  const latestMetricByPost = new Map<string, (typeof metricRows)[number]>();
+  for (const row of metricRows) {
+    if (!latestMetricByPost.has(row.postId)) latestMetricByPost.set(row.postId, row);
+  }
+  const latestMetrics = [...latestMetricByPost.values()];
+  const metrics = {
+    reach: latestMetrics.reduce((n, m) => n + (m.reach ?? 0), 0),
+    saves: latestMetrics.reduce((n, m) => n + (m.saves ?? 0), 0),
+    profileViews: latestMetrics.reduce((n, m) => n + (m.profileViews ?? 0), 0),
+    dmStarts: latestMetrics.reduce((n, m) => n + (m.dmStarts ?? 0), 0),
+    entered: latestMetrics.length,
+  };
+
+  // 柱別
+  const byPillar = new Map<string, number>();
+  for (const p of postsCreated) byPillar.set(p.pillar, (byPillar.get(p.pillar) ?? 0) + 1);
+
+  const approvalRate = decidedTotal > 0 ? Math.round((approved / decidedTotal) * 100) : null;
+  const failRate = tasksTotal > 0 ? Math.round((tasksFailed / tasksTotal) * 100) : null;
+
+  const lines: string[] = [];
+  for (const [pillar, n] of [...byPillar.entries()].sort()) {
+    lines.push(`柱「${PILLAR_NAME[pillar] ?? pillar}」: ${n}本`);
+  }
+  if (byPillar.size === 0) lines.push("この期間に作成した投稿はありません");
+  lines.push(`承認: ${approved} / 却下: ${rejected} / 修正依頼: ${revision}`);
+  lines.push(`推定モデル利用量: 約${(usage?.chars ?? 0).toLocaleString()}文字(推定値。Maxプラン枠内・API課金なし)`);
+  if (metrics.entered > 0) {
+    lines.push(`入力済みSNS指標(投稿ごとの最新スナップショット合計): リーチ ${metrics.reach} / 保存 ${metrics.saves} / プロフィール閲覧 ${metrics.profileViews} / DM開始 ${metrics.dmStarts}`);
+  } else {
+    lines.push("SNS実績値は未入力です(公開準備画面から3日後・7日後に入力してください)");
+  }
+
+  const totalPostsForStats = new Set([...postsCreated.map((p) => p.id), ...publishedPosts.map((p) => p.id)]).size;
+  const dataNote =
+    totalPostsForStats < 10
+      ? "データ不足(投稿10本未満)のため、承認率・失敗率などは傾向の可能性として扱い、統計的な断定はしません。"
+      : undefined;
+
+  return {
+    kind: "report",
+    reportKind: kind,
+    date: end,
+    periodStart: start,
+    periodEnd: end,
+    stats: {
+      postsCreated: postsCreated.length,
+      published: publishedPosts.length,
+      approved,
+      rejected,
+      revisions: revision,
+      approvalRatePct: approvalRate ?? -1,
+      failRatePct: failRate ?? -1,
+      tasksTotal,
+      tasksFailed,
+      estOutputChars: usage?.chars ?? 0,
+      snsMetricsEntered: metrics.entered,
+    },
+    lines,
+    ownerActions:
+      totalPostsForStats < 10
+        ? ["投稿数を積み上げると分析の精度が上がります(週3本目標)。"]
+        : approvalRate !== null && approvalRate < 60
+          ? ["承認率が低めです。品質基準や企画方針を蓮・昊と見直してください。"]
+          : ["現状の運用を継続してください。"],
+    tomorrow: [],
+    dataNote,
+  };
+}
+
+// ---------- V4-C: 議事録一覧 ----------
+
+export interface MeetingView {
+  id: string;
+  kind: string;
+  heldOn: string;
+  periodStart: string | null;
+  periodEnd: string | null;
+  participants: string[];
+  decisions: string[];
+  minutes: import("../../core/schemas").MeetingMinutesArtifact | null;
+}
+
+export function listMeetings(db: Db): MeetingView[] {
+  const rows = db.select().from(t.meetings).orderBy(desc(t.meetings.heldOn)).all();
+  return rows.map((m): MeetingView => {
+    let minutes: import("../../core/schemas").MeetingMinutesArtifact | null = null;
+    if (m.minutesArtifactId) {
+      const art = db.select().from(t.artifacts).where(eq(t.artifacts.id, m.minutesArtifactId)).get();
+      if (art?.contentJson) {
+        try {
+          minutes = JSON.parse(art.contentJson) as import("../../core/schemas").MeetingMinutesArtifact;
+        } catch {
+          minutes = null;
+        }
+      }
+    }
+    return {
+      id: m.id,
+      kind: m.kind,
+      heldOn: m.heldOn,
+      periodStart: m.periodStart,
+      periodEnd: m.periodEnd,
+      participants: m.participantsJson ? (JSON.parse(m.participantsJson) as string[]) : [],
+      decisions: m.decisionsJson ? (JSON.parse(m.decisionsJson) as string[]) : [],
+      minutes,
+    };
+  });
 }

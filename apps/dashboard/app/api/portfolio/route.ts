@@ -3,6 +3,7 @@ import { z } from "zod";
 import { openDb } from "@adapters/db/client";
 import { listPortfolio, addPortfolioItem } from "@adapters/db/store";
 import { toFriendlyMessage } from "@/lib/errors";
+import { assertOwnerRequest } from "@/lib/owner-request";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +36,7 @@ const addSchema = z
 /** 実績の登録(代表者)。公開許可は初期状態pending(V3-C) */
 export async function POST(req: Request): Promise<NextResponse> {
   try {
+    assertOwnerRequest(req);
     const input = addSchema.parse(await req.json());
     const { db, sqlite } = openDb();
     try {

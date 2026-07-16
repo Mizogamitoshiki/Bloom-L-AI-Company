@@ -77,7 +77,7 @@
 |---|---|---|
 | AC-28 | Given limits超過(日次タスク上限等)、When 追加の生成タスク、Then budget_pausedとなりUIに理由が表示され、代表者の再開操作で復帰する | A |
 | AC-29 | リポジトリに秘密情報・実値の.env・data/配下がコミットされていない(.env.exampleのみ)。secretスキャンが合格 | A |
-| AC-30 | When `company restore --from {日付}` を実行、Then バックアップからDBが復元され、doctorが整合を確認する | M |
+| AC-30 | When `company restore --from {日付}` を実行、Then バックアップからDBとworkspaceが同じ時点へ復元され、doctorが整合を確認する | M |
 
 ## J. 品質基準(合格ライン)
 
@@ -87,3 +87,39 @@
 | パフォーマンス | オフィス画面の初期表示3秒以内(ローカル)/ ポーリングでUIが固まらない |
 | テスト | unit・integrationが全通過 / E2E主要5シナリオ通過(→16) |
 | デモ分離 | デモモード時は全画面に「デモデータ」表示。実データと混在しない |
+
+## K. V4検証結果(2026-07-14実施、2026-07-15再監査)
+
+自動検証の全体結果: **`pnpm test` 161件通過 / `pnpm typecheck` 通過 / `pnpm build` 成功 / `pnpm e2e` 19件通過(Playwright+axe)/ `pnpm check:secrets` 合格**。MVP対象28項目(AC-24・AC-25を除く)は下表のとおり合格。doctorは実DBを変更しないようDBコピーでmigration/整合検査を行う。
+
+| ID | 状態 | 検証根拠 |
+|---|---|---|
+| AC-1 | ✅(M) | `/kickoff` が daily-report→backup→run-finish まで一巡(kickoff SKILL) |
+| AC-2 | ✅(A+M) | 前回異常終了の回収を `tests` で確認(reducers/store) |
+| AC-3 | ✅(A) | 冪等キーのタスク二重生成なし(store/idempotency テスト) |
+| AC-4 | ✅(A) | 承認待ちsoft_cap超過で生成スキップ+日報記載(v3-gates) |
+| AC-5 | ✅(M) | カルーセルPNG(1080×1350)+キャプション生成(render-post) |
+| AC-6 | ✅(A) | スロット超過は差し戻し・リトライ2回打ち切り(render/renderer) |
+| AC-7 | ✅(A) | 同一specで決定的PNG(render 再現性テスト) |
+| AC-8 | ✅(A) | 出典欠落のニュース引用は拒否(v3-gates: sources) |
+| AC-9〜11 | ✅(A) | 実イベントなしは「作業中」にしない/進捗率非表示(reducers, E2E: progressbar 0件) |
+| AC-12〜14 | ✅(M) | 社員詳細パネルの必須項目(手動確認) |
+| AC-15 | ✅(A) | QA不合格は承認キューへ出さない(qa-integrity) |
+| AC-16 | ✅(A) | 承認/却下/修正で状態遷移+audit記録(store, E2E: 承認シナリオ) |
+| AC-17 | ✅(A+M) | 修正依頼で版+1・旧版参照(store) |
+| AC-18 | ✅(A) | 未承認はexport不可(UI非表示+API/CLI拒否)(v4-export) |
+| AC-19 | ✅(A+M) | export で PNG連番+caption+checklist+meta を出力(v4-export, E2E: 公開準備導線) |
+| AC-20 | ✅(A) | published_at・publish_method=manual 記録+3日/7日実績タスク(v4-export) |
+| AC-21 | ✅(M) | 実績登録で複数切り口の企画タスク生成(手動) |
+| AC-22 | ✅(A) | verbal_only/pending は blocked_rights 隔離(v3-gates) |
+| AC-23 | ✅(A+M) | 許可なし推薦コメントは成果物に出ない(禁止語検査) |
+| AC-24・AC-25 | ⏸ 第2段階 | DM支援。MVP対象外(2026-07-13スコープ変更) |
+| AC-26 | ✅(M) | 日報が kickoff 完了時に生成・UI閲覧可(buildDailyReport) |
+| AC-27 | ✅(M) | 利用量は「推定」明示・API無効時に金額を断定しない |
+| AC-28 | ✅(A) | limits超過で budget_paused+代表者再開(v3-gates) |
+| AC-29 | ✅(A) | `pnpm check:secrets` 合格・`data/`はgitignore |
+| AC-30 | ✅(A+M) | `company restore --from` が全ファイル検証→doctor→DB/workspace置換。改ざん/欠損・途中失敗は中止し現状態を保全(v4-backup) |
+
+品質基準(J): axe critical/serious 違反 **0**(全9画面)/ キーボードだけで承認・exportへ到達可 / 375・768・1440pxで主要9画面の横overflowなし / E2Eコア7シナリオ通過(`e2e/core.spec.ts`)。
+
+> 凡例: ✅ 合格、⏸ MVP対象外(第2段階)。A=自動テスト、M=手動手順。テスト名の括弧内は `tests/` 内の該当ファイル。

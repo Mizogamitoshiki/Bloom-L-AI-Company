@@ -106,6 +106,8 @@ export const slidesSchema = z
           .object({
             heading: z.string().min(2).max(20),
             body: z.string().min(4).max(90),
+            /** V4.5 v3: 具体例/入力例/完了状態(任意。stepsで情報モジュールとして表示) */
+            example: z.string().min(2).max(54).optional(),
           })
           .strict(),
       )
@@ -189,7 +191,35 @@ const specBase = {
   kind: z.literal("carousel_spec"),
   pillar: z.enum(["1", "2", "3", "4", "5", "6"]),
   sourceCopyArtifactId: z.string().min(1),
+  /** V4.5: 系統内のlayout variant(決定的に選択。無制限なAI自由配置はしない) */
+  layoutVariant: z.string().min(1).max(24).optional(),
 } as const;
+
+/** tpl-compare: HP導入前後・よくある失敗・セルフ診断・比較(V4.5 comparison/checklist系統) */
+export const compareSlidesSchema = z
+  .object({
+    cover: coverSchema,
+    intro: headingBody, // 何を比較/診断するか
+    rows: z
+      .array(z.object({ before: z.string().min(2).max(28), after: z.string().min(2).max(28) }).strict())
+      .min(3)
+      .max(5),
+    verdict: headingBody, // 読者が次に取れる結論
+    ctaMessage: z.string().min(4).max(60),
+  })
+  .strict();
+
+export const compareCopyArtifactSchema = z
+  .object({
+    kind: z.literal("compare_copy"),
+    headline: z.string().min(4).max(40),
+    body: z.string().min(10).max(1800),
+    cta: z.string().min(4).max(120),
+    hashtags: z.array(z.string().regex(/^#\S+$/).max(40)).min(5).max(15),
+    slides: compareSlidesSchema,
+  })
+  .strict();
+export type CompareCopy = z.infer<typeof compareCopyArtifactSchema>;
 
 export const howtoSpecSchema = z
   .object({ ...specBase, templateId: z.literal("tpl-howto"), slides: slidesSchema })
@@ -210,7 +240,26 @@ export const newsSpecSchema = z
   })
   .strict();
 
-/** displayNameは許可状態から通常コードが決定する(AIが顧客名を書かない) */
+/**
+ * 実績画像の追跡情報。画像本体(data URI)はDBへ保存せず、通常コードがレンダリング中だけ渡す。
+ * 既存carousel_specとの互換性のため、PortfolioSpecではabstractをdefaultにする。
+ */
+export const portfolioMediaSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("abstract") }).strict(),
+  z
+    .object({
+      mode: z.literal("real_screenshot"),
+      assetSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+      width: z.number().int().min(320).max(12_000),
+      height: z.number().int().min(320).max(12_000),
+      safeRelativePath: z.string().min(1).max(300),
+    })
+    .strict(),
+]);
+export type PortfolioMedia = z.infer<typeof portfolioMediaSchema>;
+
+/** displayName・mediaは許可状態から通常コードが決定する(AIが顧客名/素材を指定しない) */
 export const portfolioSpecSchema = z
   .object({
     ...specBase,
@@ -218,20 +267,27 @@ export const portfolioSpecSchema = z
     slides: portfolioSlidesSchema,
     displayName: z.string().min(1).max(30),
     anonymous: z.boolean(),
+    portfolioMedia: portfolioMediaSchema.default({ mode: "abstract" }),
   })
+  .strict();
+
+export const compareSpecSchema = z
+  .object({ ...specBase, templateId: z.literal("tpl-compare"), slides: compareSlidesSchema })
   .strict();
 
 export const carouselSpecSchema = z.discriminatedUnion("templateId", [
   howtoSpecSchema,
   newsSpecSchema,
   portfolioSpecSchema,
+  compareSpecSchema,
 ]);
 export type CarouselSpec = z.infer<typeof carouselSpecSchema>;
 export type HowtoSpec = z.infer<typeof howtoSpecSchema>;
 export type NewsSpec = z.infer<typeof newsSpecSchema>;
 export type PortfolioSpec = z.infer<typeof portfolioSpecSchema>;
+export type CompareSpec = z.infer<typeof compareSpecSchema>;
 
-export const TEMPLATE_IDS = ["tpl-howto", "tpl-news", "tpl-portfolio"] as const;
+export const TEMPLATE_IDS = ["tpl-howto", "tpl-news", "tpl-portfolio", "tpl-compare"] as const;
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
 
 /** レンダリング画像成果物のメタデータ(artifacts.content_json、kind="image") */
@@ -307,19 +363,94 @@ export const sourceInputSchema = z
   .strict();
 export type SourceInput = z.infer<typeof sourceInputSchema>;
 
-/** 日報(V3-G)。DBの事実のみ集計。推定値は「推定」と明示 */
+/**
+ * レポート(V3-G日報 + V4週報/月報)。DBの事実のみ集計・推定値は「推定」と明示。
+ * periodStart/periodEnd は週報/月報の期間(daily成果物には無いためoptional=後方互換)。
+ */
 export const reportArtifactSchema = z
   .object({
     kind: z.literal("report"),
-    reportKind: z.enum(["daily"]),
+    reportKind: z.enum(["daily", "weekly", "monthly"]),
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     stats: z.record(z.number()),
     lines: z.array(z.string().max(300)),
     ownerActions: z.array(z.string().max(300)),
     tomorrow: z.array(z.string().max(300)),
+    /** 投稿10本未満などデータ不足の注記(統計的断定をしない旨) */
+    dataNote: z.string().max(300).optional(),
   })
   .strict();
 export type ReportArtifact = z.infer<typeof reportArtifactSchema>;
+
+/**
+ * 週次会議の議事録(V4-C)。事実・観察・提案・決定を分離する。
+ * decisions は代表者が承認した決定のみ(オーケストレーターが記録)。
+ */
+export const meetingMinutesArtifactSchema = z
+  .object({
+    kind: z.literal("meeting_minutes"),
+    meetingKind: z.enum(["weekly", "monthly"]),
+    heldOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    participants: z.array(z.string().max(40)).max(12),
+    agenda: z.array(z.string().max(200)).max(20),
+    facts: z.array(z.string().max(300)).max(40), // 湊: DB集計の事実
+    observations: z.array(z.string().max(300)).max(20),
+    proposals: z.array(z.string().max(300)).max(20), // 蓮: 改善仮説
+    decisions: z.array(z.string().max(300)).max(20), // 代表者承認済みのみ
+    ownerActions: z.array(z.string().max(300)).max(20),
+    nextWeekPlan: z.array(z.string().max(300)).max(20),
+  })
+  .strict();
+export type MeetingMinutesArtifact = z.infer<typeof meetingMinutesArtifactSchema>;
+
+/**
+ * design QA(V4.5)。通常コードが全PNG+specから決定的に判定する(AI不使用)。
+ * post_renders.design_qa_json に保存し、プレビュー/exportゲートの根拠にする。
+ */
+export const designQaCheckSchema = z.object({ id: z.string(), ok: z.boolean(), detail: z.string() }).strict();
+export const designQaResultSchema = z
+  .object({
+    kind: z.literal("design_qa"),
+    result: z.enum(["pass", "fail"]),
+    templateId: z.string(),
+    templateVersion: z.number().int(),
+    variant: z.string(),
+    fingerprint: z.string(),
+    pageCount: z.number().int(),
+    checks: z.array(designQaCheckSchema),
+    failures: z.array(z.string()),
+  })
+  .strict();
+export type DesignQaResult = z.infer<typeof designQaResultSchema>;
+
+/**
+ * 紫苑の視覚QA(V4.5)。レンダリング済み全PNGを実際に見て評価した構造化結果。
+ * criticalIssuesが1件でもあれば承認キューへ進めない(fail closed)。
+ */
+export const visualQaArtifactSchema = z
+  .object({
+    kind: z.literal("visual_qa"),
+    result: z.enum(["pass", "fail"]),
+    criticalIssues: z.array(z.string().min(1).max(300)),
+    minorIssues: z.array(z.string().min(1).max(300)),
+    revisionInstructions: z.array(z.string().min(1).max(300)),
+    pageFindings: z
+      .array(z.object({ page: z.number().int().min(1), severity: z.enum(["critical", "minor"]), finding: z.string().min(1).max(300) }).strict())
+      .max(50),
+  })
+  .strict()
+  .refine((v) => (v.result === "pass" ? v.criticalIssues.length === 0 : true), {
+    message: "criticalIssuesがある場合はresult=passにできません(fail closed)",
+  })
+  // V4.5 v3: pass条件を厳格化。未解決のrevisionInstructions(代表者判断が必要な設計課題)が残っていればpass不可
+  .refine((v) => (v.result === "pass" ? v.revisionInstructions.length === 0 : true), {
+    message: "revisionInstructions(未解決の設計課題)が残っている場合はresult=passにできません",
+  });
+export type VisualQaArtifact = z.infer<typeof visualQaArtifactSchema>;
 
 export const artifactContentSchema = z.union([
   noteArtifactSchema,
@@ -327,9 +458,12 @@ export const artifactContentSchema = z.union([
   copyArtifactSchema,
   newsCopyArtifactSchema,
   portfolioCopyArtifactSchema,
+  compareCopyArtifactSchema,
   carouselSpecSchema,
   qaReportArtifactSchema,
   reportArtifactSchema,
+  meetingMinutesArtifactSchema,
+  visualQaArtifactSchema,
 ]);
 export type ArtifactContent = z.infer<typeof artifactContentSchema>;
 export const ARTIFACT_KINDS = [
@@ -338,11 +472,47 @@ export const ARTIFACT_KINDS = [
   "copy",
   "news_copy",
   "portfolio_copy",
+  "compare_copy",
   "carousel_spec",
   "qa_report",
   "report",
+  "meeting_minutes",
+  "visual_qa",
   "image",
 ] as const;
+
+/** post_metrics 入力(V4-C)。NULL可・負数拒否・整数。0や推定で穴埋めしない */
+const metricInt = z.number().int().min(0).nullable();
+export const postMetricInputSchema = z
+  .object({
+    postId: z.string().min(1),
+    windowDays: z.union([z.literal(3), z.literal(7)]),
+    reach: metricInt.optional(),
+    profileViews: metricInt.optional(),
+    saves: metricInt.optional(),
+    shares: metricInt.optional(),
+    comments: metricInt.optional(),
+    dmStarts: metricInt.optional(),
+    followerCount: metricInt.optional(),
+    note: z.string().max(500).optional(),
+  })
+  .strict();
+export type PostMetricInput = z.infer<typeof postMetricInputSchema>;
+
+/** 運用設定(V4-D)。settingsテーブルへ保存 */
+export const operationSettingsSchema = z
+  .object({
+    weeklyPostTarget: z.number().int().min(1).max(7),
+    ownerDailyMinutes: z.number().int().min(10).max(120),
+    timezone: z.literal("Asia/Tokyo"),
+  })
+  .strict();
+export type OperationSettings = z.infer<typeof operationSettingsSchema>;
+export const DEFAULT_OPERATION_SETTINGS: OperationSettings = {
+  weeklyPostTarget: 3,
+  ownerDailyMinutes: 30,
+  timezone: "Asia/Tokyo",
+};
 
 export const modelProfileSchema = z.enum(MODEL_PROFILES);
 

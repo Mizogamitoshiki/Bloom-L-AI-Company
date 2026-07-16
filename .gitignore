@@ -7,6 +7,11 @@
 data/
 runs/
 
+# E2E一時領域・成果物
+.e2e-tmp/
+test-results/
+playwright-report/
+
 # 依存・ビルド
 node_modules/
 .next/

@@ -10,28 +10,23 @@ import { findRepoRoot } from "../root";
 export interface FontEntry {
   name: string;
   data: Buffer;
-  weight: 400 | 700;
+  weight: 400 | 500 | 700 | 800 | 900;
   style: "normal";
 }
+
+/** design-systemのtype scaleが使うウェイト(すべてSIL OFL 1.1) */
+const WEIGHTS: FontEntry["weight"][] = [400, 500, 700, 800, 900];
 
 let cached: FontEntry[] | null = null;
 
 export function loadFonts(): FontEntry[] {
   if (cached) return cached;
   const dir = path.join(findRepoRoot(), "node_modules", "@fontsource", "noto-sans-jp", "files");
-  cached = [
-    {
-      name: "Noto Sans JP",
-      data: readFileSync(path.join(dir, "noto-sans-jp-japanese-400-normal.woff")),
-      weight: 400,
-      style: "normal",
-    },
-    {
-      name: "Noto Sans JP",
-      data: readFileSync(path.join(dir, "noto-sans-jp-japanese-700-normal.woff")),
-      weight: 700,
-      style: "normal",
-    },
-  ];
+  cached = WEIGHTS.map((weight) => ({
+    name: "Noto Sans JP",
+    data: readFileSync(path.join(dir, `noto-sans-jp-japanese-${weight}-normal.woff`)),
+    weight,
+    style: "normal" as const,
+  }));
   return cached;
 }

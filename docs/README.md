@@ -43,6 +43,7 @@
 | 18 | [18-cloud-migration-plan.md](18-cloud-migration-plan.md) | クラウド移行計画 | 実装者(将来) |
 | 19 | [19-risks-and-mitigations.md](19-risks-and-mitigations.md) | リスクと対策 | 代表者 |
 | 20 | [20-acceptance-criteria.md](20-acceptance-criteria.md) | 受け入れ基準(テスト可能) | 全員 |
+| 25 | [25-v5-instagram-official-publishing.md](25-v5-instagram-official-publishing.md) | V5 Instagram公式API公開・安全運用 | 代表者+実装者 |
 | — | [DECISIONS.md](DECISIONS.md) | 設計判断記録(比較表付き) | 実装者 |
 | — | [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md) | 実装引き継ぎ資料 | 実装者(実装開始時に最初に読む) |
 

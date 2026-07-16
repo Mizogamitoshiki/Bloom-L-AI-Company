@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { openDb } from "@adapters/db/client";
 import { cancelTask, resumeTask } from "@adapters/db/store";
+import { assertOwnerRequest } from "@/lib/owner-request";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ const actionSchema = z.object({ action: z.enum(["cancel", "resume"]) }).strict()
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { id } = await ctx.params;
   try {
+    assertOwnerRequest(req);
     const body: unknown = await req.json();
     const { action } = actionSchema.parse(body);
     const { db, sqlite } = openDb();

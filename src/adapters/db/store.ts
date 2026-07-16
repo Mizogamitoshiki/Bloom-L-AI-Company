@@ -6,16 +6,17 @@
  * - リトライ上限・冪等性・状態遷移ガード・参照存在確認をここで強制
  * - 複数書き込みを伴う操作は1トランザクション(途中失敗で全ロールバック)
  */
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, rmSync, renameSync } from "node:fs";
 import nodePath from "node:path";
+import { writeBundleToDir, type BundleData } from "../export/bundle-writer";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { RunResult } from "better-sqlite3";
 import type { Db } from "./client";
 import * as t from "./schema";
 import * as schema from "./schema";
-import { ulid, nowIso, todayLocal, businessDate } from "../../core/ids";
-import { findRepoRoot } from "../root";
+import { ulid, nowIso, todayLocal, businessDate, addDays } from "../../core/ids";
+import { workspaceRoot } from "../root";
 
 /** SQLite: tsカラム(UTC ISO)をAsia/Tokyo業務日で比較する(P1-2) */
 const jstDateOfTs = sql<string>`date(ts, '+9 hours')`;
@@ -31,6 +32,11 @@ import {
   newsCopyArtifactSchema,
   portfolioCopyArtifactSchema,
   sourceInputSchema,
+  meetingMinutesArtifactSchema,
+  type MeetingMinutesArtifact,
+  operationSettingsSchema,
+  DEFAULT_OPERATION_SETTINGS,
+  type OperationSettings,
   permissionScopeSchema,
   SCOPE_NONE,
   type PermissionScope,
@@ -48,7 +54,11 @@ import {
   type TemplateId,
 } from "../../core/schemas";
 import { z } from "zod";
-import { templateFor } from "../../core/templates/index";
+import { templateFor, TEMPLATES } from "../../core/templates/index";
+import { computeFingerprint } from "../render/fingerprint";
+import { resolvePortfolioAssetFile, PortfolioMediaError } from "../render/portfolio-media";
+import { distinctInteriorPageCount, MIN_DISTINCT_INTERIOR_PAGES } from "../../core/templates/distinctness";
+import { visualQaArtifactSchema, type DesignQaResult, type VisualQaArtifact } from "../../core/schemas";
 import {
   collectPublicText,
   scanForbidden,
@@ -914,7 +924,7 @@ export function evidenceFileStatus(rel: string | null | undefined): { ok: boolea
   if (!p.startsWith(`${EVIDENCE_DIR}/`)) {
     return { ok: false, reason: `証跡は data/workspace/${EVIDENCE_DIR}/ 配下のみ許可されます(例: ${EVIDENCE_DIR}/顧客名-同意DM.png)` };
   }
-  const workspace = nodePath.join(findRepoRoot(), "data", "workspace");
+  const workspace = workspaceRoot();
   const abs = nodePath.resolve(workspace, p);
   const dir = nodePath.resolve(workspace, EVIDENCE_DIR) + nodePath.sep;
   if (!abs.startsWith(dir)) {
@@ -1115,6 +1125,29 @@ function assertPortfolioRightsForPost(
       throw new Error(
         `表示名が現在の許可状態と一致しません(画像: ${spec.displayName}${spec.anonymous ? "・匿名" : ""} / 許可: ${rc.displayName}${expectAnonymous ? "・匿名" : ""})。再レンダリングしてください`,
       );
+    }
+    if (spec.portfolioMedia.mode === "real_screenshot") {
+      if (!rc.allowedUses.screenshot) {
+        throw new Error("実績画像の公開許可(scope.screenshot)が現在は無効です。再レンダリングしてください");
+      }
+      const item = conn.select().from(t.portfolioItems).where(eq(t.portfolioItems.id, post.portfolioItemId)).get();
+      if (!item) throw new Error("実績素材が見つかりません。再レンダリングしてください");
+      try {
+        const current = resolvePortfolioAssetFile(item.id, item.assetsPath);
+        if (
+          current.assetSha256 !== spec.portfolioMedia.assetSha256
+          || current.safeRelativePath !== spec.portfolioMedia.safeRelativePath
+        ) {
+          throw new Error("実績画像がレンダリング後に差し替えられています。再レンダリング・再QAが必要です");
+        }
+      } catch (error) {
+        if (error instanceof PortfolioMediaError) {
+          throw new Error(`実績画像を再確認できません: ${error.message}。再レンダリングしてください`);
+        }
+        throw error;
+      }
+    } else if (spec.layoutVariant === "showcase" || !spec.layoutVariant) {
+      throw new Error("showcase画像に実績スクリーンショットの記録がありません。storyで再生成するか、画像許可を記録してください");
     }
   }
 }
@@ -1527,6 +1560,24 @@ export function addPortfolioItem(db: Db, input: PortfolioInput, actor: string): 
   });
 }
 
+/** 代表者がアップロード済みの安全な実績画像を実績レコードへ紐付ける。 */
+export function updatePortfolioAssetsPath(db: Db, portfolioItemId: string, assetsPath: string, actor: string): void {
+  if (actor !== "owner") throw new Error("実績画像の登録は代表者(owner)のみが行えます");
+  const item = db.select().from(t.portfolioItems).where(eq(t.portfolioItems.id, portfolioItemId)).get();
+  if (!item) throw new Error(`実績が見つかりません: ${portfolioItemId}`);
+  const resolved = resolvePortfolioAssetFile(portfolioItemId, assetsPath);
+  db.transaction((tx) => {
+    tx.update(t.portfolioItems)
+      .set({ assetsPath: resolved.safeRelativePath })
+      .where(eq(t.portfolioItems.id, portfolioItemId))
+      .run();
+    audit(tx, actor, "portfolio_asset_uploaded", "portfolio_item", portfolioItemId, {
+      safeRelativePath: resolved.safeRelativePath,
+      assetSha256: resolved.assetSha256,
+    });
+  });
+}
+
 export interface PermissionUpdate {
   status: "pending" | "approved" | "rejected" | "revoked";
   scope?: PermissionScope;
@@ -1784,4 +1835,707 @@ export function getEmployeeDetail(db: Db, employeeId: string, now: Date = new Da
       .where(and(eq(t.posts.status, "awaiting_approval"), eq(t.tasks.assigneeId, employeeId)))
       .all(),
   };
+}
+
+// ==========================================================================
+// V4-B: export_bundle と 投稿済み記録
+// 公開経路は「QA合格 → 代表者承認 → export → 人間の手動投稿 → published記録」のみ。
+// core/use-case層で再検査する(UI/CLIだけの判定にしない)。
+// ==========================================================================
+
+function latestQaPass(conn: DbConn, postId: string): boolean {
+  const qa = conn.select().from(t.qaReviews).where(eq(t.qaReviews.postId, postId)).orderBy(desc(t.qaReviews.createdAt)).limit(1).get();
+  return !!qa && qa.result === "pass";
+}
+
+function generatedPostsRoot(): string {
+  return nodePath.join(workspaceRoot(), "05_generated-posts");
+}
+
+export interface ExportResult {
+  postId: string;
+  exportPath: string; // 論理相対パス(05_generated-posts/<dir>)
+  files: string[];
+  skipped: boolean;
+}
+
+/**
+ * 承認済み投稿の書き出し(V4-B, AC-18/19)。owner専用。
+ * 手順: 再検査(承認/整合性/最新QA/権利) → 一時DirへBundle生成 → atomic rename → DBトランザクション。
+ * DB失敗時はこの呼び出しで作った完成フォルダを補償削除しapprovedのまま維持(既存フォルダは削除しない)。冪等。
+ */
+export function exportPost(db: Db, postId: string, actor: string): ExportResult {
+  if (actor !== "owner") throw new Error("書き出しは代表者(owner)のみが行えます");
+
+  const post = getPostOrThrow(db, postId);
+  const root = generatedPostsRoot();
+
+  // 冪等: 既に exported で export_path が実在すれば何もしない
+  if (post.status === "exported" && post.exportPath) {
+    const abs = nodePath.join(workspaceRoot(), post.exportPath.replace(/^data\/workspace\//, ""));
+    if (existsSync(abs)) {
+      return { postId, exportPath: post.exportPath, files: [], skipped: true };
+    }
+    // export_pathが失われている → doctorで検出。ここでは再書き出しを許可するため下へ進む
+  } else if (post.status !== "approved") {
+    throw new Error(`書き出しは承認済み(approved)の投稿のみ可能です(現在: ${post.status})`);
+  }
+
+  // 再検査(すべて通常コード)
+  const integrity = assertPostContentIntegrity(db, postId);
+  if (!latestQaPass(db, postId)) throw new Error("整合性エラー: 最新のQA結果が合格ではありません");
+  assertPublicTextSafety(db, post, integrity.copy);
+  assertPortfolioRightsForPost(db, post, integrity.spec);
+  // V4.5公開停止ガード: 承認済みテンプレート版・fingerprint一致・design QA合格でなければ拒否
+  assertExportableTemplate(db, postId);
+
+  // 画像の絶対パス(投稿順)
+  const imgRows = db
+    .select({ id: t.artifacts.id, filePath: t.artifacts.filePath })
+    .from(t.artifacts)
+    .where(inArray(t.artifacts.id, integrity.imageArtifactIds))
+    .all();
+  const imageFilePaths = imgRows
+    .filter((r) => r.filePath)
+    .sort((a, b) => (a.filePath ?? "").localeCompare(b.filePath ?? ""))
+    .map((r) => r.filePath!);
+  if (imageFilePaths.length === 0) throw new Error("整合性エラー: 書き出す画像がありません");
+  for (const p of imageFilePaths) {
+    if (!existsSync(p)) throw new Error(`整合性エラー: 画像ファイルが存在しません(${p})`);
+  }
+
+  const sources = getLinkedSources(db, postId)
+    .filter((s) => s.usable && s.verificationStatus === "confirmed")
+    .map((s) => ({ publisher: s.publisher, title: s.title, publishedAt: s.publishedAt }));
+
+  const bd = businessDate();
+  const dirName = `${bd}_${postId}`;
+  const exportDir = nodePath.join(root, dirName);
+  const relPath = `data/workspace/05_generated-posts/${dirName}`;
+
+  const c = integrity.copy;
+  const data: BundleData = {
+    postId,
+    title: post.title,
+    templateId: post.templateId,
+    pillar: post.pillar,
+    imageFilePaths,
+    caption: { headline: c.headline, body: c.body, cta: c.cta, hashtags: c.hashtags },
+    sources,
+    rightsState: post.rightsState,
+    exportedAt: nowIso(),
+    businessDate: bd,
+  };
+
+  // 一時Dir(同一ボリューム)へ生成 → atomic rename
+  const tmpDir = nodePath.join(root, `.export-tmp-${ulid()}`);
+  let files: string[];
+  try {
+    files = writeBundleToDir(tmpDir, data);
+  } catch (err) {
+    rmSync(tmpDir, { recursive: true, force: true });
+    throw err;
+  }
+
+  // 書き出し先が既存なら上書きしない(既存フォルダは削除しない)
+  if (existsSync(exportDir)) {
+    rmSync(tmpDir, { recursive: true, force: true });
+    if (post.status === "exported") {
+      return { postId, exportPath: relPath, files: [], skipped: true };
+    }
+    throw new Error(`書き出し先が既に存在します: ${relPath}。pnpm company doctor で確認してください`);
+  }
+  renameSync(tmpDir, exportDir);
+
+  // DBトランザクション。失敗時は本呼び出しで作ったフォルダを補償削除
+  try {
+    db.transaction((tx) => {
+      const fresh = getPostOrThrow(tx, postId);
+      if (fresh.status === "approved") {
+        setPostStatus(tx, fresh, "exported", { exportPath: relPath });
+      } else if (fresh.status !== "exported") {
+        throw new Error(`書き出し中に投稿状態が変わりました(現在: ${fresh.status})`);
+      }
+      audit(tx, actor, "post_exported", "post", postId, { exportPath: relPath, images: imageFilePaths.length });
+    });
+  } catch (dbErr) {
+    rmSync(exportDir, { recursive: true, force: true });
+    throw dbErr;
+  }
+
+  return { postId, exportPath: relPath, files, skipped: false };
+}
+
+export interface PublishRecordResult {
+  postId: string;
+  publishedAt: string;
+  metricTaskIds: string[];
+}
+
+export type PublishMethod = "manual" | "meta_api";
+
+/**
+ * 投稿済み記録(V4-B, AC-20)。owner専用。exported の投稿のみ。
+ * 手動公開またはV5公式API公開の完了記録。3日/7日後の実績入力タスクを各1件作る(JST・重複なし)。
+ */
+export function recordPublish(db: Db, postId: string, actor: string, publishMethod: PublishMethod = "manual"): PublishRecordResult {
+  if (actor !== "owner") throw new Error("投稿済み記録は代表者(owner)のみが行えます");
+  return db.transaction((tx) => {
+    const post = getPostOrThrow(tx, postId);
+    if (post.status !== "exported") {
+      throw new Error(`「投稿済みにする」は書き出し済み(exported)の投稿のみ可能です(現在: ${post.status})`);
+    }
+    const publishedAt = nowIso();
+    setPostStatus(tx, post, "published", { publishedAt, publishMethod });
+    audit(tx, actor, "publish_recorded", "post", postId, { publishedAt, publishMethod });
+
+    // 3日後・7日後の実績値入力タスク(湊)。runDateは対象日(JST)で冪等
+    const bd = businessDate();
+    const metricTaskIds: string[] = [];
+    for (const win of [3, 7] as const) {
+      const targetDate = addDays(bd, win);
+      const task = createTaskIn(
+        tx,
+        {
+          type: "report",
+          title: `実績値入力(${win}日後): ${post.title}`.slice(0, 120),
+          assigneeId: "emp_minato",
+          postId,
+          stepKey: `metric-d${win}`,
+          priority: 4,
+          input: { windowDays: win, kind: "post_metrics_reminder" },
+        },
+        targetDate,
+        actor,
+      );
+      metricTaskIds.push(task.id);
+    }
+    return { postId, publishedAt, metricTaskIds };
+  });
+}
+
+/**
+ * V5公開直前ゲート。export時の検査を再実行し、権利取消・QA/テンプレート変更を公開直前にも検出する。
+ * Metaアダプターはこの関数を通らない限り外部通信してはならない。
+ */
+export function assertPostReadyForExternalPublish(db: Db, postId: string): { exportPath: string; title: string } {
+  const post = getPostOrThrow(db, postId);
+  if (post.status !== "exported" || !post.exportPath) {
+    throw new Error(`Instagram公開は書き出し済み(exported)の投稿のみ可能です(現在: ${post.status})`);
+  }
+  const integrity = assertPostContentIntegrity(db, postId);
+  if (!latestQaPass(db, postId)) throw new Error("整合性エラー: 最新のQA結果が合格ではありません");
+  assertPublicTextSafety(db, post, integrity.copy);
+  assertPortfolioRightsForPost(db, post, integrity.spec);
+  assertExportableTemplate(db, postId);
+
+  const abs = nodePath.resolve(workspaceRoot(), post.exportPath.replace(/^data\/workspace\//, ""));
+  const root = nodePath.resolve(workspaceRoot(), "05_generated-posts") + nodePath.sep;
+  if (!abs.startsWith(root) || !existsSync(abs) || !statSync(abs).isDirectory()) {
+    throw new Error("書き出しフォルダが存在しないか、許可された公開フォルダ外です。再書き出ししてください");
+  }
+  return { exportPath: post.exportPath, title: post.title };
+}
+
+/** 実績値の記録(V4-C)。owner専用。NULL可・負数拒否・整数はスキーマで強制。既存(post+window)は上書き更新 */
+export function addPostMetric(db: Db, input: import("../../core/schemas").PostMetricInput, actor: string): { id: string; updated: boolean } {
+  if (actor !== "owner") throw new Error("実績値の入力は代表者(owner)のみが行えます");
+  return db.transaction((tx) => {
+    const post = getPostOrThrow(tx, input.postId);
+    void post;
+    const existing = tx
+      .select()
+      .from(t.postMetrics)
+      .where(and(eq(t.postMetrics.postId, input.postId), eq(t.postMetrics.windowDays, input.windowDays)))
+      .get();
+    const values = {
+      measuredAt: nowIso(),
+      reach: input.reach ?? null,
+      profileViews: input.profileViews ?? null,
+      saves: input.saves ?? null,
+      shares: input.shares ?? null,
+      comments: input.comments ?? null,
+      dmStarts: input.dmStarts ?? null,
+      followerCount: input.followerCount ?? null,
+      note: input.note?.trim() || null,
+    };
+    if (existing) {
+      tx.update(t.postMetrics).set(values).where(eq(t.postMetrics.id, existing.id)).run();
+      audit(tx, actor, "post_metric_recorded", "post", input.postId, { windowDays: input.windowDays, updated: true });
+      return { id: existing.id, updated: true };
+    }
+    const id = ulid();
+    tx.insert(t.postMetrics)
+      .values({ id, postId: input.postId, windowDays: input.windowDays, createdAt: nowIso(), ...values })
+      .run();
+    audit(tx, actor, "post_metric_recorded", "post", input.postId, { windowDays: input.windowDays, updated: false });
+    return { id, updated: false };
+  });
+}
+
+/** 公開準備ビュー: approved(書き出し可)/exported(投稿済み記録可)/published の投稿 */
+export interface PublishReadyItem {
+  id: string;
+  title: string;
+  status: string;
+  exportPath: string | null;
+  publishedAt: string | null;
+  imageArtifactIds: string[];
+  integrityError: string | null;
+  metrics: { windowDays: number; measuredAt: string; hasData: boolean }[];
+}
+
+export function listPublishReady(db: Db): PublishReadyItem[] {
+  const posts = db
+    .select()
+    .from(t.posts)
+    .where(inArray(t.posts.status, ["approved", "exported", "published", "measured"]))
+    .orderBy(desc(t.posts.createdAt))
+    .all();
+  return posts.map((post): PublishReadyItem => {
+    let integrityError: string | null = null;
+    let imageArtifactIds: string[] = [];
+    try {
+      const r = assertPostContentIntegrity(db, post.id);
+      imageArtifactIds = r.imageArtifactIds;
+    } catch (e) {
+      integrityError = e instanceof Error ? e.message : String(e);
+    }
+    const metrics = db
+      .select()
+      .from(t.postMetrics)
+      .where(eq(t.postMetrics.postId, post.id))
+      .all()
+      .map((m) => ({
+        windowDays: m.windowDays ?? 0,
+        measuredAt: m.measuredAt,
+        hasData: [m.reach, m.profileViews, m.saves, m.shares, m.comments, m.dmStarts, m.followerCount].some((v) => v !== null),
+      }));
+    return {
+      id: post.id,
+      title: post.title,
+      status: post.status,
+      exportPath: post.exportPath,
+      publishedAt: post.publishedAt,
+      imageArtifactIds,
+      integrityError,
+      metrics,
+    };
+  });
+}
+
+// ---------- V4-C: 週次会議の議事録保存 ----------
+// オーケストレーターが weekly-review skill 経由で CLI から保存する。
+// meeting_minutes 成果物(履歴はversionで保持)+ meetings行(kind+期間で最新を保持)。
+
+export function saveMeeting(db: Db, input: unknown, actor: string): { meetingId: string; artifactId: string } {
+  const minutes: MeetingMinutesArtifact = meetingMinutesArtifactSchema.parse(input);
+  if (minutes.decisions.length > 0 && actor !== "owner") {
+    throw new Error("会議の決定(decisions)は代表者(owner)が確認した場合だけ保存できます。AI社員はproposalsへ記録してください");
+  }
+  return db.transaction((tx) => {
+    // 会議コンテナのタスク(常に新規。議事録は再保存で新versionになる)
+    const created = createTaskIn(
+      tx,
+      {
+        type: "meeting",
+        title: `${minutes.meetingKind === "weekly" ? "週次" : "月次"}会議 ${minutes.periodStart}〜${minutes.periodEnd}`.slice(0, 120),
+        assigneeId: "emp_aoi",
+        stepKey: `meeting-${minutes.meetingKind}-${minutes.periodEnd}-${ulid().slice(-6)}`,
+        priority: 5,
+      },
+      businessDate(),
+      actor,
+    );
+    setTaskStatus(tx, created, "running", { startedAt: nowIso() });
+    const running = getTaskOrThrow(tx, created.id);
+    const artifactId = insertContentArtifactIn(tx, running, minutes, actor);
+    completeTaskIn(tx, running, actor, { estOutputChars: JSON.stringify(minutes).length });
+
+    // meetings行: 同一 kind+period_end は最新へ置換(スナップショット)
+    const existing = tx
+      .select()
+      .from(t.meetings)
+      .where(and(eq(t.meetings.kind, minutes.meetingKind), eq(t.meetings.periodEnd, minutes.periodEnd)))
+      .get();
+    const meetingId = existing?.id ?? ulid();
+    const row = {
+      kind: minutes.meetingKind,
+      heldOn: minutes.heldOn,
+      periodStart: minutes.periodStart,
+      periodEnd: minutes.periodEnd,
+      participantsJson: JSON.stringify(minutes.participants),
+      agendaJson: JSON.stringify(minutes.agenda),
+      decisionsJson: JSON.stringify(minutes.decisions),
+      minutesArtifactId: artifactId,
+      createdAt: nowIso(),
+    };
+    if (existing) {
+      tx.update(t.meetings).set(row).where(eq(t.meetings.id, meetingId)).run();
+    } else {
+      tx.insert(t.meetings).values({ id: meetingId, ...row }).run();
+    }
+    audit(tx, actor, "meeting_saved", "meeting", meetingId, { kind: minutes.meetingKind, periodEnd: minutes.periodEnd });
+    if (minutes.decisions.length > 0) {
+      audit(tx, actor, "meeting_decisions_confirmed", "meeting", meetingId, { count: minutes.decisions.length });
+    }
+    return { meetingId, artifactId };
+  });
+}
+
+// ---------- V4-D: 運用設定(owner専用) ----------
+
+export function getOperationSettings(db: Db): OperationSettings {
+  const saved = getSetting<Partial<OperationSettings>>(db, "operation_settings");
+  const merged = { ...DEFAULT_OPERATION_SETTINGS, ...(saved ?? {}) };
+  const parsed = operationSettingsSchema.safeParse(merged);
+  return parsed.success ? parsed.data : { ...DEFAULT_OPERATION_SETTINGS };
+}
+
+export function updateOperationSettings(db: Db, input: unknown, actor: string): OperationSettings {
+  if (actor !== "owner") throw new Error("運用設定の変更は代表者(owner)のみが行えます");
+  const next = operationSettingsSchema.parse(input);
+  db.transaction((tx) => {
+    setSetting(tx, "operation_settings", next);
+    audit(tx, actor, "setting_changed", "settings", "operation_settings", { ...next });
+  });
+  return next;
+}
+
+// ---------- V4.5: テンプレート版承認・レンダリング記録・公開停止ガード ----------
+
+export type TemplateVersionRow = typeof t.templateVersions.$inferSelect;
+export type PostRenderRow = typeof t.postRenders.$inferSelect;
+export type TemplateDecision = "approved" | "rejected" | "revision_requested";
+
+/** そのテンプレートの現行版番号(登録済みの最大値。未登録は1) */
+export function currentTemplateVersion(db: Db, templateId: string): number {
+  const row = db
+    .select({ v: sql<number>`max(version)` })
+    .from(t.templateVersions)
+    .where(eq(t.templateVersions.templateId, templateId))
+    .get();
+  return row?.v ?? 1;
+}
+
+/** 現行版の版行を用意する(なければdraftを作成)。冪等。fingerprintは現行design-systemから決定的に算出 */
+export function ensureTemplateVersion(db: Db, templateId: string, actor = "system"): TemplateVersionRow {
+  const version = currentTemplateVersion(db, templateId);
+  const existing = getTemplateVersion(db, templateId, version);
+  if (existing) return existing;
+  const family = TEMPLATES[templateId as keyof typeof TEMPLATES]?.family ?? templateId;
+  const fingerprint = computeFingerprint(templateId, version);
+  const id = ulid();
+  db.transaction((tx) => {
+    tx.insert(t.templateVersions).values({ id, templateId, family, version, status: "draft", fingerprint, createdAt: nowIso() }).run();
+    audit(tx, actor, "template_version_registered", "template_version", id, { templateId, version, fingerprint });
+  });
+  return getTemplateVersion(db, templateId, version)!;
+}
+
+/** 指定版をdraftとして用意する(なければ作成)。既存v1を消さずv2を新設する用途。冪等 */
+export function ensureTemplateVersionAt(db: Db, templateId: string, version: number, actor = "system"): TemplateVersionRow {
+  const existing = getTemplateVersion(db, templateId, version);
+  if (existing) return existing;
+  const family = TEMPLATES[templateId as keyof typeof TEMPLATES]?.family ?? templateId;
+  const fingerprint = computeFingerprint(templateId, version);
+  const id = ulid();
+  db.transaction((tx) => {
+    tx.insert(t.templateVersions).values({ id, templateId, family, version, status: "draft", fingerprint, createdAt: nowIso() }).run();
+    audit(tx, actor, "template_version_registered", "template_version", id, { templateId, version, fingerprint });
+  });
+  return getTemplateVersion(db, templateId, version)!;
+}
+
+/** 全テンプレートの現行版をdraftとして登録する(CLI/preview用。冪等) */
+export function registerAllTemplateVersions(db: Db, actor = "system"): TemplateVersionRow[] {
+  return (Object.keys(TEMPLATES) as (keyof typeof TEMPLATES)[]).map((id) => ensureTemplateVersion(db, id, actor));
+}
+
+/** 全テンプレートの指定版をdraftとして登録する(v2生成用。既存版は不変) */
+export function registerAllTemplateVersionsAt(db: Db, version: number, actor = "system"): TemplateVersionRow[] {
+  return (Object.keys(TEMPLATES) as (keyof typeof TEMPLATES)[]).map((id) => ensureTemplateVersionAt(db, id, version, actor));
+}
+
+export function getTemplateVersion(db: Db, templateId: string, version: number): TemplateVersionRow | undefined {
+  return db
+    .select()
+    .from(t.templateVersions)
+    .where(and(eq(t.templateVersions.templateId, templateId), eq(t.templateVersions.version, version)))
+    .get();
+}
+
+export function listTemplateVersions(db: Db): TemplateVersionRow[] {
+  return db.select().from(t.templateVersions).orderBy(asc(t.templateVersions.templateId), desc(t.templateVersions.version)).all();
+}
+
+/** 最新の承認済み版(templateIdごと)。無ければnull */
+export function latestApprovedTemplateVersion(db: Db, templateId: string): TemplateVersionRow | null {
+  return (
+    db
+      .select()
+      .from(t.templateVersions)
+      .where(and(eq(t.templateVersions.templateId, templateId), eq(t.templateVersions.status, "approved")))
+      .orderBy(desc(t.templateVersions.version))
+      .get() ?? null
+  );
+}
+
+/** テンプレート版の承認/却下/修正依頼(owner専用)。自己承認は不可。audit記録 */
+export function decideTemplateVersion(
+  db: Db,
+  input: { templateId: string; version: number; decision: TemplateDecision; note?: string },
+  actor: string,
+): TemplateVersionRow {
+  if (actor !== "owner") throw new Error("テンプレート版の承認・却下は代表者(owner)のみが行えます");
+  const row = getTemplateVersion(db, input.templateId, input.version);
+  if (!row) throw new Error(`テンプレート版が見つかりません: ${input.templateId} v${input.version}`);
+  // 却下・修正依頼は理由必須(audit_logへ保存)
+  if ((input.decision === "rejected" || input.decision === "revision_requested") && !input.note?.trim()) {
+    throw new Error("却下・修正依頼には理由(note)の入力が必要です");
+  }
+  // 承認は、全variantのpreview・content/mechanical/visual QA・fingerprint一致・権利が揃って初めて可能(core層で強制)
+  if (input.decision === "approved") assertTemplateApprovable(db, input.templateId, input.version);
+  db.transaction((tx) => {
+    tx.update(t.templateVersions)
+      .set({ status: input.decision, note: input.note ?? null, decidedAt: nowIso(), decidedBy: actor })
+      .where(eq(t.templateVersions.id, row.id))
+      .run();
+    audit(tx, actor, "template_version_decided", "template_version", row.id, {
+      templateId: input.templateId,
+      version: input.version,
+      decision: input.decision,
+      fingerprint: row.fingerprint,
+      note: input.note ?? null,
+    });
+  });
+  return getTemplateVersion(db, input.templateId, input.version)!;
+}
+
+/** 投稿レンダリングの記録(使用版・variant・fingerprint・design QA結果)。最新が有効 */
+export function recordPostRender(
+  db: Db,
+  input: {
+    postId: string;
+    specArtifactId: string;
+    templateId: string;
+    templateVersion: number;
+    variant: string;
+    fingerprint: string;
+    designQa: DesignQaResult;
+  },
+  actor = "system",
+): string {
+  const id = ulid();
+  db.transaction((tx) => {
+    tx.insert(t.postRenders)
+      .values({
+        id,
+        postId: input.postId,
+        specArtifactId: input.specArtifactId,
+        templateId: input.templateId,
+        templateVersion: input.templateVersion,
+        variant: input.variant,
+        fingerprint: input.fingerprint,
+        designQaResult: input.designQa.result,
+        designQaJson: JSON.stringify(input.designQa),
+        createdAt: nowIso(),
+      })
+      .run();
+    audit(tx, actor, "post_rendered", "post", input.postId, {
+      templateId: input.templateId,
+      version: input.templateVersion,
+      variant: input.variant,
+      fingerprint: input.fingerprint,
+      designQa: input.designQa.result,
+    });
+  });
+  return id;
+}
+
+/** 投稿の最新レンダリング記録 */
+export function latestPostRender(db: Db, postId: string): PostRenderRow | null {
+  return (
+    db.select().from(t.postRenders).where(eq(t.postRenders.postId, postId)).orderBy(desc(t.postRenders.createdAt)).get() ?? null
+  );
+}
+
+/**
+ * 公開停止ガード(V4.5 §2)。承認済みテンプレート版・fingerprint一致・design QA合格・現行承認版でなければ拒否する。
+ * exportPost / UI / CLI / API の全経路がこれを通る(回避不能)。
+ */
+export function assertExportableTemplate(db: Db, postId: string): { templateId: string; version: number; fingerprint: string } {
+  const render = latestPostRender(db, postId);
+  if (!render) {
+    throw new Error("テンプレート版の記録がありません。承認済みテンプレートで再レンダリングしてください(V4.5)");
+  }
+  if (render.designQaResult !== "pass") {
+    throw new Error("デザインQAに合格していない画像は書き出せません(mechanical design QA fail)");
+  }
+  if (render.visualQaResult !== "pass") {
+    throw new Error("紫苑の視覚QA(visual QA)に合格していない画像は書き出せません(未実施または fail)");
+  }
+  const tv = getTemplateVersion(db, render.templateId, render.templateVersion);
+  if (!tv || tv.status !== "approved") {
+    throw new Error("このテンプレート版は代表者に承認されていません。承認前のテンプレートでは公開できません");
+  }
+  if (render.fingerprint !== tv.fingerprint) {
+    throw new Error("テンプレートのfingerprintが承認時と一致しません(旧版または改変の可能性)");
+  }
+  const latest = latestApprovedTemplateVersion(db, render.templateId);
+  if (!latest || render.templateVersion !== latest.version) {
+    throw new Error("承認済みの最新テンプレート版で再レンダリングされていません(旧版の画像は公開できません)");
+  }
+  return { templateId: render.templateId, version: render.templateVersion, fingerprint: render.fingerprint };
+}
+
+// ---------- V4.5 v2: variant単位QA・視覚QA・承認ゲート ----------
+
+export type TemplateVariantQaRow = typeof t.templateVariantQa.$inferSelect;
+
+/** テンプレート版のfingerprintが現行実装と一致するか(コード変更を検知) */
+export function templateFingerprintMatchesCurrent(db: Db, templateId: string, version: number): boolean {
+  const row = getTemplateVersion(db, templateId, version);
+  if (!row) return false;
+  return row.fingerprint === computeFingerprint(templateId, version);
+}
+
+/** preview生成時: variantのcontent/mechanical QA・プレビュー完了・fingerprint・権利・fixture種別をupsert(visual QAは別途) */
+export function upsertTemplateVariantQa(
+  db: Db,
+  input: {
+    templateId: string; version: number; variant: string; fingerprint: string;
+    contentQaResult: "pass" | "fail"; mechanicalQaResult: "pass" | "fail";
+    previewComplete: boolean; pageCount: number; fixtureKind: "fictional" | "real"; rights: string;
+    layoutIds?: string[]; pageHashes?: string[];
+  },
+  actor = "system",
+): void {
+  const now = nowIso();
+  const layoutIdsJson = input.layoutIds ? JSON.stringify(input.layoutIds) : null;
+  const pageHashesJson = input.pageHashes ? JSON.stringify(input.pageHashes) : null;
+  const existing = db
+    .select()
+    .from(t.templateVariantQa)
+    .where(and(eq(t.templateVariantQa.templateId, input.templateId), eq(t.templateVariantQa.version, input.version), eq(t.templateVariantQa.variant, input.variant)))
+    .get();
+  db.transaction((tx) => {
+    if (existing) {
+      // fingerprintが変わったら視覚QAは無効化(再確認が必要)
+      const visualStays = existing.fingerprint === input.fingerprint;
+      tx.update(t.templateVariantQa)
+        .set({
+          fingerprint: input.fingerprint, contentQaResult: input.contentQaResult, mechanicalQaResult: input.mechanicalQaResult,
+          previewComplete: input.previewComplete ? 1 : 0, pageCount: input.pageCount, fixtureKind: input.fixtureKind, rights: input.rights,
+          layoutIdsJson: layoutIdsJson ?? existing.layoutIdsJson, pageHashesJson: pageHashesJson ?? existing.pageHashesJson,
+          visualQaResult: visualStays ? existing.visualQaResult : null, visualQaJson: visualStays ? existing.visualQaJson : null,
+          updatedAt: now,
+        })
+        .where(eq(t.templateVariantQa.id, existing.id))
+        .run();
+    } else {
+      tx.insert(t.templateVariantQa).values({
+        id: ulid(), templateId: input.templateId, version: input.version, variant: input.variant, fingerprint: input.fingerprint,
+        contentQaResult: input.contentQaResult, mechanicalQaResult: input.mechanicalQaResult, visualQaResult: null, visualQaJson: null,
+        previewComplete: input.previewComplete ? 1 : 0, pageCount: input.pageCount, fixtureKind: input.fixtureKind, rights: input.rights,
+        layoutIdsJson, pageHashesJson, createdAt: now, updatedAt: now,
+      }).run();
+    }
+    audit(tx, actor, "template_variant_qa_recorded", "template_version", `${input.templateId}:v${input.version}:${input.variant}`, {
+      content: input.contentQaResult, mechanical: input.mechanicalQaResult, previewComplete: input.previewComplete,
+    });
+  });
+}
+
+/** 紫苑の視覚QAをvariantへ記録する。Zod検証しfail closed(critical>=1はpass不可はschemaで担保) */
+export function recordTemplateVisualQa(
+  db: Db,
+  input: { templateId: string; version: number; variant: string; visualQa: unknown },
+  actor = "shion",
+): TemplateVariantQaRow {
+  const parsed: VisualQaArtifact = visualQaArtifactSchema.parse(input.visualQa);
+  const row = db
+    .select()
+    .from(t.templateVariantQa)
+    .where(and(eq(t.templateVariantQa.templateId, input.templateId), eq(t.templateVariantQa.version, input.version), eq(t.templateVariantQa.variant, input.variant)))
+    .get();
+  if (!row) throw new Error(`variantのプレビューが未生成です: ${input.templateId} v${input.version} ${input.variant}(先に template-preview を実行)`);
+  db.transaction((tx) => {
+    tx.update(t.templateVariantQa)
+      .set({ visualQaResult: parsed.result, visualQaJson: JSON.stringify(parsed), updatedAt: nowIso() })
+      .where(eq(t.templateVariantQa.id, row.id))
+      .run();
+    audit(tx, actor, "template_visual_qa_recorded", "template_version", `${input.templateId}:v${input.version}:${input.variant}`, {
+      result: parsed.result, critical: parsed.criticalIssues.length,
+    });
+  });
+  return db.select().from(t.templateVariantQa).where(eq(t.templateVariantQa.id, row.id)).get()!;
+}
+
+export function listTemplateVariantQa(db: Db, templateId: string, version: number): TemplateVariantQaRow[] {
+  return db
+    .select()
+    .from(t.templateVariantQa)
+    .where(and(eq(t.templateVariantQa.templateId, templateId), eq(t.templateVariantQa.version, version)))
+    .orderBy(asc(t.templateVariantQa.variant))
+    .all();
+}
+
+/** 実運用のpost_renderへ視覚QAを紐付ける(Zod検証)。exportゲートが要求する */
+export function attachPostRenderVisualQa(db: Db, postRenderId: string, visualQa: unknown, actor = "shion"): void {
+  const parsed: VisualQaArtifact = visualQaArtifactSchema.parse(visualQa);
+  const row = db.select().from(t.postRenders).where(eq(t.postRenders.id, postRenderId)).get();
+  if (!row) throw new Error(`post_renderが見つかりません: ${postRenderId}`);
+  db.transaction((tx) => {
+    tx.update(t.postRenders).set({ visualQaResult: parsed.result, visualQaJson: JSON.stringify(parsed) }).where(eq(t.postRenders.id, postRenderId)).run();
+    audit(tx, actor, "post_render_visual_qa", "post", row.postId, { result: parsed.result, critical: parsed.criticalIssues.length });
+  });
+}
+
+export interface ApprovabilityFailure { variant: string; reason: string }
+
+/** 承認可否をcore層で判定する。全variantのpreview・QA・fingerprint・権利が揃わなければ理由付きで拒否 */
+export function templateApprovability(db: Db, templateId: string, version: number): { ok: boolean; failures: ApprovabilityFailure[] } {
+  const failures: ApprovabilityFailure[] = [];
+  const tpl = (TEMPLATES as Record<string, { variants: readonly string[] }>)[templateId];
+  if (!tpl) return { ok: false, failures: [{ variant: "-", reason: `不明なテンプレート: ${templateId}` }] };
+  if (!templateFingerprintMatchesCurrent(db, templateId, version)) {
+    failures.push({ variant: "-", reason: "登録fingerprintが現行実装と一致しません(再生成が必要)" });
+  }
+  const qaRows = listTemplateVariantQa(db, templateId, version);
+  const versionFp = getTemplateVersion(db, templateId, version)?.fingerprint;
+  for (const variant of tpl.variants) {
+    const qa = qaRows.find((r) => r.variant === variant);
+    if (!qa) { failures.push({ variant, reason: "プレビュー/QA記録がありません(未確認variant)" }); continue; }
+    if (!qa.previewComplete) failures.push({ variant, reason: "プレビューが未完成" });
+    if (qa.fingerprint !== versionFp) failures.push({ variant, reason: "fingerprintが版と不一致" });
+    if (qa.contentQaResult !== "pass") failures.push({ variant, reason: "content QA未合格" });
+    if (qa.mechanicalQaResult !== "pass") failures.push({ variant, reason: "mechanical design QA未合格" });
+    if (qa.visualQaResult !== "pass") failures.push({ variant, reason: "紫苑の視覚QA未合格(未実施またはfail)" });
+    if (!qa.rights) failures.push({ variant, reason: "権利情報が未記録" });
+  }
+  // V4.5 v3: 承認候補の2variantは本文が実質的に異なる必要がある(表紙だけの差分を拒否)
+  if (tpl.variants.length === 2) {
+    const [va, vb] = tpl.variants.map((variant) => qaRows.find((r) => r.variant === variant));
+    if (va?.layoutIdsJson && va.pageHashesJson && vb?.layoutIdsJson && vb.pageHashesJson) {
+      const a = { layoutIds: JSON.parse(va.layoutIdsJson) as string[], pageHashes: JSON.parse(va.pageHashesJson) as string[] };
+      const b = { layoutIds: JSON.parse(vb.layoutIdsJson) as string[], pageHashes: JSON.parse(vb.pageHashesJson) as string[] };
+      const n = distinctInteriorPageCount(a, b);
+      if (n < MIN_DISTINCT_INTERIOR_PAGES) {
+        failures.push({ variant: `${tpl.variants[0]}↔${tpl.variants[1]}`, reason: `本文の差分が不足(01〜05で${n}ページのみ相違・最低${MIN_DISTINCT_INTERIOR_PAGES}必要)` });
+      }
+    } else {
+      failures.push({ variant: "-", reason: "variant差分判定用のlayoutId/画像ハッシュが未記録" });
+    }
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+/** 承認ゲート。満たさなければ日本語の理由付きで throw(UI/API/CLIすべてが通る) */
+export function assertTemplateApprovable(db: Db, templateId: string, version: number): void {
+  const { ok, failures } = templateApprovability(db, templateId, version);
+  if (!ok) {
+    const detail = failures.map((f) => `${f.variant}: ${f.reason}`).join(" / ");
+    throw new Error(`テンプレート版を承認できません(全variantのプレビュー・content/mechanical/visual QA・fingerprint・権利が必要): ${detail}`);
+  }
 }

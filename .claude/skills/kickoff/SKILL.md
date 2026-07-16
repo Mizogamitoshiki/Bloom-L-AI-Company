@@ -91,9 +91,11 @@ pnpm company source-link --post <postId> --source <sourceId> --actor aoi
 - 1日の新規投稿は上限3本(通常1本)。承認待ち5件以上で生成は自動停止する
 
 ### 6. 終了とサマリー
+**終了処理は必ずこの順で実行する(V4-E): daily-report → backup → run-finish**
 ```bash
-pnpm company daily-report        # 日報の生成・保存(通常コード集計。V3-G)
-pnpm company run-finish --run <runId>
+pnpm company daily-report        # 1. 日報の生成・保存(通常コード集計。V3-G)
+pnpm company backup              # 2. 当日のバックアップ(整合スナップショット+SHA-256。14世代)
+pnpm company run-finish --run <runId>   # 3. run終了
 pnpm --silent company status
 ```
 最後に代表者向けサマリーを日本語で報告する:

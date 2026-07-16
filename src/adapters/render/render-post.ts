@@ -14,14 +14,21 @@ import {
   getPostContent,
   getLinkedSources,
   checkPortfolioRights,
+  listPortfolio,
+  ensureTemplateVersion,
+  currentTemplateVersion,
+  recordPostRender,
 } from "../db/store";
 import { buildSpecFromContent } from "../../core/templates/tpl-howto";
 import { templateFor } from "../../core/templates/index";
 import type { CarouselSpec, Copy, NewsCopy, PortfolioCopy } from "../../core/schemas";
 import { carouselSpecSchema } from "../../core/schemas";
 import { renderCarousel, OverflowError } from "./renderer";
+import { runDesignQa } from "./design-qa";
 import { findRepoRoot } from "../root";
 import { todayLocal } from "../../core/ids";
+import { resolvePortfolioMedia, PortfolioMediaError } from "./portfolio-media";
+import type { TemplateRenderAssets } from "../../core/templates/index";
 
 export class RightsError extends Error {
   constructor(message: string) {
@@ -41,14 +48,18 @@ export type RenderPostResult =
       imageArtifactIds: string[];
     };
 
-function buildSpec(db: Db, postId: string, copyArtifactId: string): CarouselSpec {
+async function buildSpec(
+  db: Db,
+  postId: string,
+  copyArtifactId: string,
+): Promise<{ spec: CarouselSpec; assets?: TemplateRenderAssets }> {
   const { post, plan, copy } = getPostContent(db, postId);
   if (!plan) throw new Error(`投稿 ${postId} に post_plan 成果物がありません`);
   if (!copy) throw new Error(`投稿 ${postId} にコピー成果物がありません`);
   const template = templateFor(post.templateId);
 
   if (template.id === "tpl-howto") {
-    return buildSpecFromContent(plan, copyArtifactId, (copy as Copy).slides);
+    return { spec: buildSpecFromContent(plan, copyArtifactId, (copy as Copy).slides) };
   }
   if (template.id === "tpl-news") {
     // 出典はDB登録済みsourcesから注入(V3-B)。AIが出典を書くことはない
@@ -58,7 +69,7 @@ function buildSpec(db: Db, postId: string, copyArtifactId: string): CarouselSpec
         "tpl-newsは確認済みsourceの紐付けが必須です(company source-add → source-link のあとに再実行してください)",
       );
     }
-    return carouselSpecSchema.parse({
+    return { spec: carouselSpecSchema.parse({
       kind: "carousel_spec",
       templateId: "tpl-news",
       pillar: plan.pillar,
@@ -69,7 +80,7 @@ function buildSpec(db: Db, postId: string, copyArtifactId: string): CarouselSpec
         publisher: s.publisher.slice(0, 40),
         publishedAt: s.publishedAt,
       })),
-    });
+    }) };
   }
   // tpl-portfolio: 許可検査(V3-C)。displayNameは通常コードが決定する
   if (!post.portfolioItemId) throw new Error("tpl-portfolioの投稿にportfolioItemIdがありません");
@@ -77,15 +88,34 @@ function buildSpec(db: Db, postId: string, copyArtifactId: string): CarouselSpec
   if (!rights.allowed || !rights.displayName) {
     throw new RightsError(`実績素材を使用できません: ${rights.reason}(公開許可の記録が必要です)`);
   }
-  return carouselSpecSchema.parse({
+  const portfolio = listPortfolio(db).find((entry) => entry.item.id === post.portfolioItemId);
+  if (!portfolio) throw new RightsError("実績素材が見つかりません");
+
+  // screenshot許可+素材ありなら実画像showcase。許可なし/素材なしは画像を渡さずstoryへ限定する。
+  let media: Awaited<ReturnType<typeof resolvePortfolioMedia>> | null = null;
+  if (rights.allowedUses.screenshot && portfolio.item.assetsPath) {
+    try {
+      media = await resolvePortfolioMedia(portfolio.item.id, portfolio.item.assetsPath);
+    } catch (error) {
+      if (error instanceof PortfolioMediaError) throw new RightsError(`実績画像を使用できません: ${error.message}`);
+      throw error;
+    }
+  }
+  const spec = carouselSpecSchema.parse({
     kind: "carousel_spec",
     templateId: "tpl-portfolio",
     pillar: plan.pillar,
     sourceCopyArtifactId: copyArtifactId,
+    layoutVariant: media ? "showcase" : "story",
     slides: (copy as PortfolioCopy).slides,
     displayName: rights.displayName,
     anonymous: rights.mode === "anonymous",
+    portfolioMedia: media?.meta ?? { mode: "abstract" },
   });
+  return {
+    spec,
+    ...(media ? { assets: { portfolioImageDataUri: media.dataUri, portfolioAssetSha256: media.meta.assetSha256 } } : {}),
+  };
 }
 
 /**
@@ -102,7 +132,8 @@ export async function renderPost(
   if (!copy || copyVersion === null || !copyArtifactId) throw new Error(`投稿 ${postId} にコピー成果物がありません`);
 
   // 権利・source前提の検査はタスク生成前に行う(不許可素材はレンダリング自体を開始しない)
-  const spec = buildSpec(db, postId, copyArtifactId);
+  const built = await buildSpec(db, postId, copyArtifactId);
+  const { spec } = built;
 
   const { task, created } = createTask(
     db,
@@ -125,8 +156,20 @@ export async function renderPost(
   const base = opts.outDirBase ?? path.join(findRepoRoot(), "data", "workspace", "05_generated-posts");
   const outDir = path.join(base, postId, `v${copyVersion}`);
   try {
-    const result = await renderCarousel(spec, outDir);
+    // 現行テンプレート版を用意し、その版でレンダリング(fingerprint整合)
+    ensureTemplateVersion(db, spec.templateId, actor);
+    const templateVersion = currentTemplateVersion(db, spec.templateId);
+    const result = await renderCarousel(spec, outDir, { templateVersion, assets: built.assets });
     const saved = addRenderArtifacts(db, task.id, spec, result.files, actor);
+    // design QA(通常コード)を実行し、レンダリング記録を残す(公開停止ガードの根拠)
+    const designQa = await runDesignQa(spec, {
+      files: result.files, pageCount: result.pageCount, variant: result.variant, fingerprint: result.fingerprint, templateVersion,
+      embeddedAssetSha256: result.embeddedAssetSha256,
+    });
+    recordPostRender(db, {
+      postId, specArtifactId: saved.specArtifactId, templateId: spec.templateId, templateVersion,
+      variant: result.variant, fingerprint: result.fingerprint, designQa,
+    }, actor);
     return { skipped: false, taskId: task.id, pageCount: result.pageCount, files: result.files, ...saved };
   } catch (err) {
     if (err instanceof OverflowError) {

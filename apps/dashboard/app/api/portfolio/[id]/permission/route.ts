@@ -3,6 +3,7 @@ import { z } from "zod";
 import { openDb } from "@adapters/db/client";
 import { updatePermission } from "@adapters/db/store";
 import { toFriendlyMessage } from "@/lib/errors";
+import { assertOwnerRequest } from "@/lib/owner-request";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,7 @@ const bodySchema = z
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { id } = await ctx.params; // permissionId
   try {
+    assertOwnerRequest(req);
     const update = bodySchema.parse(await req.json());
     const { db, sqlite } = openDb();
     try {

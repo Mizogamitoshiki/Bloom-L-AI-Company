@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { openDb } from "@adapters/db/client";
 import { decidePost } from "@adapters/db/store";
+import { assertOwnerRequest } from "@/lib/owner-request";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,7 @@ const bodySchema = z
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { id } = await ctx.params;
   try {
+    assertOwnerRequest(req);
     const body: unknown = await req.json();
     const { action, comment } = bodySchema.parse(body);
     const decisionMap = { approve: "approved", reject: "rejected", revise: "revision_requested" } as const;

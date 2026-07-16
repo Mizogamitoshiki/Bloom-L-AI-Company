@@ -3,6 +3,7 @@ import { z } from "zod";
 import { openDb } from "@adapters/db/client";
 import { reschedulePost } from "@adapters/db/store";
 import { toFriendlyMessage } from "@/lib/errors";
+import { assertOwnerRequest } from "@/lib/owner-request";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,7 @@ const bodySchema = z.object({ plannedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { id } = await ctx.params;
   try {
+    assertOwnerRequest(req);
     const { plannedDate } = bodySchema.parse(await req.json());
     const { db, sqlite } = openDb();
     try {

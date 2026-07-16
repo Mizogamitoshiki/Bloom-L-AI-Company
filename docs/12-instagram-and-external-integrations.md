@@ -1,5 +1,7 @@
 # 12. Instagram・外部サービス連携
 
+> **V5追補(2026-07-15):** Instagram Login経由の公式API公開アダプターを実装した。既定は`disabled`、設定確認時は`dry_run`、実投稿は代表者が`live`を明示した場合のみ。詳細は[25-v5-instagram-official-publishing.md](25-v5-instagram-official-publishing.md)。MVP当時の手動経路はフォールバックとして維持する。
+
 ## 1. Instagram運用(MVP=手動)【確定§12・§18】
 
 ### 手動投稿フロー
@@ -12,11 +14,11 @@
 ### 予約投稿(手動の範囲)
 - Meta Business Suite / Instagramアプリの公式予約機能が使えるアカウント種別なら、代表者の手動操作での予約を推奨(checklist.mdに手順記載)。これはAPI連携ではないため追加確認不要
 
-## 2. Meta Graph API連携(第2段階)【Q1回答済み(2026-07-13): MVPは自動投稿なし。第2段階でアカウント設定を確認し、条件を満たす場合に予約投稿を検討】
+## 2. Meta Graph API連携(V5で安全な公開経路を実装、外部設定・実機確認は未完了)
 
 ### 前提条件(初期セットアップ時に確認する項目【確定§12】)
-- [ ] アカウント種別(ビジネス/クリエイター/個人) — コンテンツ公開APIはプロアカウント+Facebookページ連携が必要(実装時に最新の公式要件を再確認。**現時点の要件を断定しない**)
-- [ ] Facebookページの有無・連携状態
+- [ ] アカウント種別(ビジネス/クリエイター) — Instagram Login経路はプロアカウントが対象
+- [ ] Instagram Login用Metaアプリ・必要権限(`instagram_business_basic` / `instagram_business_content_publish`)
 - [ ] Meta Business Suiteへのアクセス
 - [ ] Meta開発者アカウント・アプリ作成の可否
 
@@ -30,7 +32,7 @@
 ```ts
 interface SnsPort {
   export(post): ExportBundle;            // MVP実装: ManualExportAdapter
-  schedule?(post, at): Result;           // 将来: MetaApiAdapter(承認済みのみ受け付ける)
+  publish?(post): Result;                // V5: MetaInstagramClient(承認・export済みのみ)
   fetchMetrics?(postRef): Metrics;       // 将来: インサイト自動取得
 }
 ```

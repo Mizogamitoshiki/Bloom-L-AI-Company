@@ -4,6 +4,7 @@ import { openDb } from "@adapters/db/client";
 import { getGenerationPause, resumeGeneration } from "@adapters/db/store";
 import { brandStatus } from "@adapters/config";
 import { toFriendlyMessage } from "@/lib/errors";
+import { assertOwnerRequest } from "@/lib/owner-request";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,7 @@ const bodySchema = z.object({ action: z.literal("resume_generation") }).strict()
 /** 生成停止の解除(代表者のみ・監査ログ記録。V3-H) */
 export async function POST(req: Request): Promise<NextResponse> {
   try {
+    assertOwnerRequest(req);
     bodySchema.parse(await req.json());
     const { db, sqlite } = openDb();
     try {

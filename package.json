@@ -11,7 +11,10 @@
     "company": "tsx scripts/company.ts",
     "sync-agents": "tsx scripts/sync-agents.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && pnpm --filter dashboard typecheck"
+    "typecheck": "tsc --noEmit && pnpm --filter dashboard typecheck",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install chromium",
+    "check:secrets": "node --import tsx scripts/check-secrets.ts"
   },
   "dependencies": {
     "@fontsource/noto-sans-jp": "^5.2.9",
@@ -23,6 +26,8 @@
     "zod": "^3.25.67"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
     "tsx": "^4.20.3",

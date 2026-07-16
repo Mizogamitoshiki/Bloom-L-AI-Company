@@ -42,7 +42,7 @@ export default function PortfolioPage(): JSX.Element {
     try {
       const res = await fetch("/api/portfolio", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
         body: JSON.stringify({
           customerName: form.customerName,
           siteUrl: form.siteUrl || undefined,
@@ -56,6 +56,25 @@ export default function PortfolioPage(): JSX.Element {
       if (!res.ok) throw new Error((json as { error?: string }).error ?? "登録に失敗しました");
       setNotice("実績を登録しました(公開許可は pending から始まります)");
       setForm({ customerName: "", siteUrl: "", anonymousName: "", summary: "", problem: "", technologies: "" });
+      await load();
+    } catch (e2) {
+      setError(e2 instanceof Error ? e2.message : String(e2));
+    }
+  }
+
+  async function uploadAsset(e: React.FormEvent<HTMLFormElement>, itemId: string): Promise<void> {
+    e.preventDefault();
+    try {
+      const formData = new FormData(e.currentTarget);
+      const res = await fetch(`/api/portfolio/${itemId}/assets`, {
+        method: "POST",
+        headers: { "x-bloom-owner-action": "confirmed-in-ui" },
+        body: formData,
+      });
+      const json: unknown = await res.json();
+      if (!res.ok) throw new Error((json as { error?: string }).error ?? "画像の登録に失敗しました");
+      setNotice("実績画像を安全領域へ登録しました。投稿で使うには許可範囲の「画面キャプチャ」も有効にしてください");
+      e.currentTarget.reset();
       await load();
     } catch (e2) {
       setError(e2 instanceof Error ? e2.message : String(e2));
@@ -77,7 +96,7 @@ export default function PortfolioPage(): JSX.Element {
     try {
       const res = await fetch(`/api/portfolio/${permissionId}/permission`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
         body: JSON.stringify({
           status,
           anonymousAllowed: permForm.anonymousAllowed,
@@ -120,6 +139,9 @@ export default function PortfolioPage(): JSX.Element {
               {item.anonymousName ? <span style={{ color: "var(--color-ink-muted)" }}>(匿名名: {item.anonymousName})</span> : null}
               {item.siteUrl ? <> — <a href={item.siteUrl} target="_blank" rel="noreferrer">{item.siteUrl}</a></> : null}
               <div style={{ fontSize: 12, color: "var(--color-ink-muted)" }}>実績ID: {item.id}</div>
+              <div style={{ fontSize: 12, color: "var(--color-ink-muted)" }}>
+                実績画像: {item.assetsPath ?? "未登録"}
+              </div>
               <div style={{ fontSize: 13, marginTop: 4 }}>
                 許可状態:{" "}
                 <strong style={{ color: permission?.status === "approved" ? "var(--color-success)" : "var(--color-warning)" }}>
@@ -147,6 +169,13 @@ export default function PortfolioPage(): JSX.Element {
               <div style={{ fontSize: 13, marginTop: 2 }}>
                 投稿での利用可否: {rights.allowed ? `可(${rights.mode === "anonymous" ? "匿名" : "実名"}: ${rights.displayName})` : `不可 — ${rights.reason}`}
               </div>
+              <form onSubmit={(e) => void uploadAsset(e, item.id)} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                <label style={{ fontSize: 13 }}>
+                  HP画面キャプチャ(PNG/JPEG/WebP・20MB以下)
+                  <input name="file" type="file" accept="image/png,image/jpeg,image/webp" required style={{ display: "block", marginTop: 4 }} />
+                </label>
+                <button type="submit" className="btn-secondary">画像を登録・差し替え</button>
+              </form>
               {permission ? (
                 editPermId === permission.id ? (
                   <fieldset style={{ marginTop: 8, border: "1px solid var(--color-wall)", borderRadius: 6, padding: 10 }}>

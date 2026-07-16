@@ -22,3 +22,11 @@ export function findRepoRoot(start: string = process.cwd()): string {
   cached = path.resolve(start);
   return cached;
 }
+
+/**
+ * ワークスペースルート(素材・生成物・書き出しの基点)。
+ * 既定は <repo>/data/workspace。BLOOM_WORKSPACE_PATH で上書き可能(テスト/E2Eは一時ディレクトリを指定し実データを汚さない)。
+ */
+export function workspaceRoot(): string {
+  return process.env.BLOOM_WORKSPACE_PATH ?? path.join(findRepoRoot(), "data", "workspace");
+}

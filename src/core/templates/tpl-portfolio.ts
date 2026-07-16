@@ -1,134 +1,249 @@
 /**
- * tpl-portfolio: HP制作実績紹介(柱⑤)。V3-D。
- * 構成(5ページ固定): 表紙 → 課題 → 対応 → 成果 → 使用技術+CTA。
- * displayName(顧客名/匿名名)は許可状態から通常コードが注入する(AIは顧客名を書かない)。
- * customer_permissionsがapproved以外の実名利用はレンダリング前に拒否される(render-post)。
+ * portfolio/case-study 系統(V4.5 v3)。showcase と story で本文layoutを実質的に分ける。
+ *  - showcase: 表紙(端末モック)→ 課題 → 対応(注釈付きモック)→ 成果(できること)→ 技術 → CTA
+ *  - story: 表紙(ストーリー)→ 課題→判断→設計→実装→確認のプロセス図 → 判断カード → Before/After → 技術 → CTA
+ * displayNameは許可状態から通常コードが注入。fixtureは架空事例として明示。成果数値は捏造しない。
  */
 import type { PortfolioSpec } from "../schemas";
+import type { TemplateRenderAssets } from "./index";
+import { CONTENT_WIDTH, SPACE, RADIUS, type Theme } from "./design-system";
 import {
-  CONTENT_WIDTH,
-  type BrandColors,
-  type SatoriNode,
-  type SlotDef,
-  type SlotText,
-  el,
-  textSlot,
-  frame,
-  brandBar,
-  pageDots,
-  centerColumn,
-  sectionTag,
-  PILLAR_LABEL,
-} from "./shared";
+  page, header, footer, body, tag, barHeading, quoteCard, deviceMock, annotatedMock, techTags, checkItem,
+  processFlow, splitTwo, beforeAfterCard, miniChecklist, swipeHint,
+  text, slot, el, typeStyle, pg, type SatoriNode, type RenderedPage, type SlotText,
+} from "./components";
+import { ctaPage } from "./tpl-howto";
 
-export const PORTFOLIO_SLOTS = {
-  coverTitle: { id: "cover.title", width: CONTENT_WIDTH, fontSize: 72, lineHeight: 1.35, weight: 700, maxHeight: 400 },
-  coverSubtitle: { id: "cover.subtitle", width: CONTENT_WIDTH, fontSize: 40, lineHeight: 1.5, weight: 400, maxHeight: 130 },
-  sectionHeading: { id: "section.heading", width: CONTENT_WIDTH, fontSize: 52, lineHeight: 1.3, weight: 700, maxHeight: 140 },
-  sectionBody: { id: "section.body", width: CONTENT_WIDTH, fontSize: 40, lineHeight: 1.75, weight: 400, maxHeight: 560 },
-  techItem: { id: "tech.items[i]", width: 420, fontSize: 32, lineHeight: 1.4, weight: 700, maxHeight: 100 },
-  ctaMessage: { id: "cta.message", width: CONTENT_WIDTH, fontSize: 50, lineHeight: 1.5, weight: 700, maxHeight: 240 },
-} as const satisfies Record<string, SlotDef>;
+export const VARIANTS = ["showcase", "story"] as const;
+export type PortfolioVariant = (typeof VARIANTS)[number];
 
-export function enumeratePortfolioSlots(spec: PortfolioSpec): SlotText[] {
-  const s: SlotText[] = [{ def: PORTFOLIO_SLOTS.coverTitle, slotPath: "cover.title", text: spec.slides.cover.title }];
-  if (spec.slides.cover.subtitle) {
-    s.push({ def: PORTFOLIO_SLOTS.coverSubtitle, slotPath: "cover.subtitle", text: spec.slides.cover.subtitle });
-  }
-  for (const key of ["challenge", "approach", "result"] as const) {
-    s.push({ def: PORTFOLIO_SLOTS.sectionHeading, slotPath: `${key}.heading`, text: spec.slides[key].heading });
-    s.push({ def: PORTFOLIO_SLOTS.sectionBody, slotPath: `${key}.body`, text: spec.slides[key].body });
-  }
-  spec.slides.tech.items.forEach((t, i) =>
-    s.push({ def: PORTFOLIO_SLOTS.techItem, slotPath: `tech.items[${i}]`, text: t }),
-  );
-  s.push({ def: PORTFOLIO_SLOTS.ctaMessage, slotPath: "cta.message", text: spec.slides.ctaMessage });
-  return s;
+const COVER_TEXT_W = 480;
+const WIDE = CONTENT_WIDTH - 12 - SPACE.md - SPACE.lg * 2;
+
+export function pickVariant(spec: PortfolioSpec): PortfolioVariant {
+  if (spec.layoutVariant && (VARIANTS as readonly string[]).includes(spec.layoutVariant)) return spec.layoutVariant as PortfolioVariant;
+  return "showcase";
 }
 
-export function expectedPortfolioPages(_spec: PortfolioSpec): number {
-  return 5;
+export function enumerateSlots(spec: PortfolioSpec): SlotText[] {
+  return [
+    slot("cover.title", spec.slides.cover.title, "h2", COVER_TEXT_W, 3),
+    slot("cover.subtitle", spec.slides.cover.subtitle, "lead", COVER_TEXT_W, 3),
+    slot("challenge.heading", spec.slides.challenge.heading, "label", WIDE, 2),
+    slot("challenge.body", spec.slides.challenge.body, "body", WIDE, 4),
+    slot("approach.heading", spec.slides.approach.heading, "label", WIDE, 2),
+    slot("approach.body", spec.slides.approach.body, "body", WIDE, 4),
+    slot("result.heading", spec.slides.result.heading, "label", WIDE, 2),
+    slot("result.body", spec.slides.result.body, "body", WIDE, 4),
+    slot("cta.message", spec.slides.ctaMessage, "h2", CONTENT_WIDTH, 4),
+  ];
 }
 
-const SECTION_LABEL = { challenge: "課題", approach: "Bloom-Lの対応", result: "成果" } as const;
+export function layoutIds(_spec: PortfolioSpec, variant: PortfolioVariant): string[] {
+  return variant === "story"
+    ? ["pf-cover-story", "pf-process", "pf-decision", "pf-beforeafter", "pf-tech", "cta"]
+    : ["pf-cover-showcase", "pf-challenge", "pf-approach-mock", "pf-result-check", "pf-tech", "cta"];
+}
 
-export function buildPortfolioPages(spec: PortfolioSpec, colors: BrandColors): SatoriNode[] {
-  const total = 5;
-  const pillar = PILLAR_LABEL[spec.pillar];
-  const nameLine = spec.anonymous ? `${spec.displayName}(匿名事例)` : `${spec.displayName} さま`;
+export function expectedPages(): number {
+  return 6;
+}
 
-  const cover = frame(colors, [
-    brandBar(colors, pillar),
-    centerColumn(
-      [
-        sectionTag(colors, "制作実績", colors.accent),
-        textSlot(PORTFOLIO_SLOTS.coverTitle, spec.slides.cover.title),
-        el("div", { fontSize: 36, fontWeight: 700, color: colors.primaryDark, display: "flex" }, nameLine),
-        ...(spec.slides.cover.subtitle
-          ? [textSlot(PORTFOLIO_SLOTS.coverSubtitle, spec.slides.cover.subtitle, { color: colors.inkMuted })]
-          : []),
-      ],
-      32,
-    ),
-    pageDots(colors, total, 0),
+export function buildPages(
+  spec: PortfolioSpec,
+  theme: Theme,
+  variant: PortfolioVariant = pickVariant(spec),
+  assets?: TemplateRenderAssets,
+): RenderedPage[] {
+  return variant === "story" ? buildStory(spec, theme, assets) : buildShowcase(spec, theme, assets);
+}
+
+const MOCK_LINES = ["営業時間・アクセス", "サービス紹介", "お問い合わせフォーム"];
+
+/** 許可済み実画像を端末風フレームへ配置する。画像比率は維持し、上端基準でトリミングする。 */
+function screenshotMock(theme: Theme, dataUri: string, title: string, width = 360, height = 500): SatoriNode {
+  const p = theme.colors;
+  const imageHeight = height - 82;
+  const image: SatoriNode = {
+    type: "img",
+    props: {
+      src: dataUri,
+      width: width - 16,
+      height: imageHeight,
+      style: { display: "flex", objectFit: "cover", objectPosition: "top" },
+    },
+  };
+  return el("div", {
+    display: "flex", flexDirection: "column", width, height, borderRadius: RADIUS.xl,
+    backgroundColor: "#fff", border: `8px solid ${p.ink}`, overflow: "hidden",
+    boxShadow: "0 20px 50px rgba(22,35,63,0.22)", flexShrink: 0,
+  }, [
+    el("div", {
+      display: "flex", alignItems: "center", justifyContent: "center", height: 74,
+      flexShrink: 0, backgroundColor: p.primary, color: "#fff", fontSize: 22,
+      fontWeight: 800, padding: "0 16px", textAlign: "center",
+    }, title),
+    image,
   ]);
+}
 
-  const sections = (["challenge", "approach", "result"] as const).map((key, idx) =>
-    frame(colors, [
-      brandBar(colors, pillar),
-      centerColumn([
-        sectionTag(colors, SECTION_LABEL[key]),
-        textSlot(PORTFOLIO_SLOTS.sectionHeading, spec.slides[key].heading),
-        textSlot(PORTFOLIO_SLOTS.sectionBody, spec.slides[key].body),
+/** 実画像+設計注釈。注釈が画面を隠さないよう左右分割する。 */
+function annotatedScreenshot(theme: Theme, dataUri: string, notes: string[]): SatoriNode {
+  const p = theme.colors;
+  return el("div", { display: "flex", alignItems: "center", gap: SPACE.xl, width: "100%" }, [
+    screenshotMock(theme, dataUri, "許可済みHP画面", 390, 520),
+    el("div", { display: "flex", flexDirection: "column", gap: SPACE.md, flexGrow: 1 }, notes.slice(0, 4).map((note, i) =>
+      el("div", {
+        display: "flex", alignItems: "center", gap: SPACE.md, backgroundColor: p.primarySoft,
+        borderRadius: RADIUS.md, padding: SPACE.md,
+      }, [
+        el("div", {
+          width: 42, height: 42, borderRadius: 999, backgroundColor: p.primary, color: "#fff",
+          display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22,
+          fontWeight: 800, flexShrink: 0,
+        }, String(i + 1)),
+        el("div", { fontSize: 25, lineHeight: 1.45, fontWeight: 700, color: p.ink, display: "flex", whiteSpace: "pre-wrap" }, note),
       ]),
-      pageDots(colors, total, idx + 1),
-    ]),
-  );
-
-  const ctaPage = frame(colors, [
-    brandBar(colors, pillar),
-    centerColumn(
-      [
-        sectionTag(colors, "使用技術"),
-        el(
-          "div",
-          { display: "flex", flexWrap: "wrap", gap: 16 },
-          spec.slides.tech.items.map((t) =>
-            el(
-              "div",
-              {
-                border: `3px solid ${colors.primary}`,
-                color: colors.primaryDark,
-                fontSize: 32,
-                fontWeight: 700,
-                padding: "10px 24px",
-                borderRadius: 10,
-                display: "flex",
-              },
-              t,
-            ),
-          ),
-        ),
-        textSlot(PORTFOLIO_SLOTS.ctaMessage, spec.slides.ctaMessage, { textAlign: "center", alignSelf: "center", marginTop: 24 }),
-        el(
-          "div",
-          {
-            backgroundColor: colors.primary,
-            color: "#ffffff",
-            fontSize: 40,
-            fontWeight: 700,
-            padding: "24px 48px",
-            borderRadius: 12,
-            display: "flex",
-            alignSelf: "center",
-          },
-          "DMで「相談」とお送りください",
-        ),
-      ],
-      36,
-    ),
-    pageDots(colors, total, 4),
+    )),
   ]);
+}
 
-  return [cover, ...sections, ctaPage];
+function techPage(spec: PortfolioSpec, theme: Theme, cur: number): RenderedPage {
+  const p = theme.colors;
+  return pg("pf-tech", page(theme, "soft", [
+    header(theme, "担当範囲・使用技術"),
+    body([
+      barHeading(theme, "h2", "使用した技術・担当範囲"),
+      techTags(theme, spec.slides.tech.items),
+      miniChecklist(theme, "Bloom-Lが一貫対応", ["企画・設計", "制作・実装", "公開・運用サポート"]),
+    ], { gap: SPACE.lg, justify: "center" }),
+    footer(theme, 6, cur),
+  ]));
+}
+
+function ctaPg(spec: PortfolioSpec, theme: Theme): RenderedPage {
+  return pg("cta", ctaPage(theme, spec.slides.ctaMessage, { badge: "DMで相談", sub: "「相談」とメッセージしてください" }, 6, 5));
+}
+
+// ---- showcase(完成物を見せる) ----
+function buildShowcase(spec: PortfolioSpec, theme: Theme, assets?: TemplateRenderAssets): RenderedPage[] {
+  const p = theme.colors;
+  if (spec.portfolioMedia.mode !== "real_screenshot" || !assets?.portfolioImageDataUri) {
+    throw new Error("showcaseは公開許可済みの実績スクリーンショットがある場合のみ生成できます");
+  }
+  const screenshot = assets.portfolioImageDataUri;
+  const displayChip = el("div", { backgroundColor: p.primarySoft, color: p.primaryDark, fontSize: 26, fontWeight: 700, padding: "8px 20px", borderRadius: 999, alignSelf: "flex-start", display: "flex" }, spec.displayName);
+  return [
+    pg("pf-cover-showcase", page(theme, "white", [
+      header(theme, "制作実績"),
+      body([
+        el("div", { display: "flex", gap: SPACE.xl, alignItems: "center", width: "100%" }, [
+          el("div", { display: "flex", flexDirection: "column", gap: SPACE.md, width: COVER_TEXT_W }, [
+            tag(theme, "CASE STUDY", "soft"),
+            text("h2", spec.slides.cover.title, { color: p.ink }),
+            displayChip,
+            text("lead", spec.slides.cover.subtitle, { color: p.inkMuted }),
+          ]),
+          el("div", { display: "flex", flexGrow: 1, justifyContent: "center" }, [screenshotMock(theme, screenshot, "制作したHP")]),
+        ]),
+        swipeHint(theme, 6),
+      ], { gap: SPACE.lg, justify: "space-between" }),
+      footer(theme, 6, 0, { cta: "DMで相談" }),
+    ])),
+    pg("pf-challenge", page(theme, "soft", [
+      header(theme, "01 ・ 課題"),
+      body([
+        barHeading(theme, "h2", "ご相談時の課題"),
+        quoteCard(theme, spec.slides.challenge.heading, spec.slides.challenge.body, "accent"),
+        miniChecklist(theme, "お客様が困っていた点", ["営業時間外の連絡を受けとめられない", "情報がまとまっておらず伝わりにくい"]),
+      ], { gap: SPACE.lg, justify: "center" }),
+      footer(theme, 6, 1),
+    ])),
+    pg("pf-approach-mock", page(theme, "white", [
+      header(theme, "02 ・ 対応・設計"),
+      body([
+        barHeading(theme, "h2", "画面と導線を設計"),
+        annotatedScreenshot(theme, screenshot, ["スマホで見やすいレイアウト", "24時間の問い合わせフォーム", "サービス・実績を整理して掲載"]),
+        el("div", { ...typeStyle("body", { whiteSpace: "pre-wrap" }), color: p.inkMuted }, spec.slides.approach.body),
+      ], { gap: SPACE.lg, justify: "center" }),
+      footer(theme, 6, 2),
+    ])),
+    pg("pf-result-check", page(theme, "white", [
+      header(theme, "03 ・ 設計でできること"),
+      body([
+        quoteCard(theme, spec.slides.result.heading, spec.slides.result.body, "primary"),
+        el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, [
+          checkItem(theme, "営業時間外でも予約希望を記録できる", "ok"),
+          checkItem(theme, "スマホから迷わず問い合わせできる", "ok"),
+        ]),
+      ], { gap: SPACE.xl, justify: "center" }),
+      footer(theme, 6, 3),
+    ])),
+    techPage(spec, theme, 4),
+    ctaPg(spec, theme),
+  ];
+}
+
+// ---- story(課題→判断→設計→実装→確認) ----
+function buildStory(spec: PortfolioSpec, theme: Theme, assets?: TemplateRenderAssets): RenderedPage[] {
+  const p = theme.colors;
+  const realScreenshot = spec.portfolioMedia.mode === "real_screenshot" ? assets?.portfolioImageDataUri : undefined;
+  return [
+    pg("pf-cover-story", page(theme, "soft", [
+      header(theme, "制作実績"),
+      body([
+        el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, [
+          tag(theme, "CASE STUDY ・ ストーリー", "soft"),
+          text("h2", spec.slides.cover.title, { color: p.ink }),
+          el("div", { display: "flex", gap: SPACE.sm, alignItems: "center" }, [
+            el("div", { backgroundColor: p.primarySoft, color: p.primaryDark, fontSize: 26, fontWeight: 700, padding: "8px 20px", borderRadius: 999, display: "flex" }, spec.displayName),
+            text("lead", spec.slides.cover.subtitle, { color: p.inkMuted }),
+          ]),
+        ]),
+        el("div", { display: "flex", justifyContent: "center", width: "100%" }, [
+          realScreenshot ? screenshotMock(theme, realScreenshot, "制作したHP") : deviceMock(theme, "設計イメージ", MOCK_LINES),
+        ]),
+        swipeHint(theme, 6),
+      ], { gap: SPACE.lg, justify: "space-between" }),
+      footer(theme, 6, 0, { cta: "DMで相談" }),
+    ])),
+    pg("pf-process", page(theme, "white", [
+      header(theme, "制作プロセス"),
+      body([
+        barHeading(theme, "h2", "課題から公開までの流れ"),
+        processFlow(theme, [
+          { label: "課題", heading: spec.slides.challenge.heading },
+          { label: "判断", heading: "スマホ対応と24時間受付を優先" },
+          { label: "設計", heading: spec.slides.approach.heading },
+          { label: "実装", heading: "フォーム・導線を実装" },
+          { label: "確認", heading: spec.slides.result.heading },
+        ]),
+      ], { gap: SPACE.lg, justify: "center" }),
+      footer(theme, 6, 1),
+    ])),
+    pg("pf-decision", page(theme, "soft", [
+      header(theme, "設計の判断"),
+      body([
+        barHeading(theme, "h2", "なぜこの設計にしたか"),
+        splitTwo(theme,
+          { label: "課題", text: spec.slides.challenge.body, tone: "accent" },
+          { label: "対応・設計", text: spec.slides.approach.heading, tone: "primary" },
+        ),
+        el("div", { ...typeStyle("body", { whiteSpace: "pre-wrap" }), color: p.ink }, spec.slides.approach.body),
+      ], { gap: SPACE.lg, justify: "center" }),
+      footer(theme, 6, 2),
+    ])),
+    pg("pf-beforeafter", page(theme, "white", [
+      header(theme, "設計で変わる受け方"),
+      body([
+        barHeading(theme, "h2", "対応前 と 設計後"),
+        beforeAfterCard(theme, "電話のみで受付", "24時間フォームで受付"),
+        beforeAfterCard(theme, "情報が探しにくい", "1か所に整理して掲載"),
+        el("div", { ...typeStyle("caption"), color: p.inkMuted }, "架空事例のデモです。成果数値・顧客評価は生成していません。" ),
+      ], { gap: SPACE.md, justify: "center" }),
+      footer(theme, 6, 3),
+    ])),
+    techPage(spec, theme, 4),
+    ctaPg(spec, theme),
+  ];
 }

@@ -59,14 +59,14 @@ describe("tpl-news", () => {
     await expect(renderPost(opened.db, post.id, "system", { outDirBase: imgDir })).rejects.toThrow(/source/);
   });
 
-  it("source紐付け後は5ページの1080×1350が生成され、出典が通常コードで注入される", async () => {
+  it("source紐付け後は6ページの1080×1350が生成され、出典が通常コードで注入される", async () => {
     const post = createPost(opened.db, { pillar: "1", format: "carousel", title: "ニューステスト", templateId: "tpl-news" }, "aoi");
     submitPlanAndCopy(post.id, NEWS_COPY, "1");
     const src = addSource(opened.db, SOURCE_A, "rin");
     linkSourceToPost(opened.db, post.id, src.id, "aoi");
     const result = await renderPost(opened.db, post.id, "system", { outDirBase: imgDir });
     if (result.skipped) throw new Error("skipped unexpectedly");
-    expect(result.pageCount).toBe(5);
+    expect(result.pageCount).toBe(6);
     const meta = await sharp(result.files[0]!).metadata();
     expect(meta.width).toBe(1080);
     expect(meta.height).toBe(1350);
@@ -93,7 +93,7 @@ describe("tpl-news", () => {
       const r1 = await renderCarousel(spec, d1);
       const r2 = await renderCarousel(spec, d2);
       expect(readFileSync(r1.files[0]!).equals(readFileSync(r2.files[0]!))).toBe(true);
-      expect(templateFor("tpl-news").expectedPages(spec)).toBe(5);
+      expect(templateFor("tpl-news").expectedPages(spec)).toBe(6);
       // 改行乱用の文字あふれは拒否される
       const overflow = { ...spec, slides: { ...spec.slides, opinion: { heading: "検査", body: "行\n".repeat(20).trim() } } };
       await expect(renderCarousel(carouselSpecSchema.parse(overflow), d1)).rejects.toThrow(/文字あふれ/);
@@ -123,7 +123,7 @@ describe("tpl-portfolio", () => {
     submitPlanAndCopy(post.id, PORTFOLIO_COPY, "5");
     const result = await renderPost(opened.db, post.id, "system", { outDirBase: imgDir });
     if (result.skipped) throw new Error("skipped unexpectedly");
-    expect(result.pageCount).toBe(5);
+    expect(result.pageCount).toBe(6);
     const spec = opened.sqlite
       .prepare("select content_json from artifacts where post_id = ? and kind = 'carousel_spec' order by version desc")
       .get(post.id) as { content_json: string };

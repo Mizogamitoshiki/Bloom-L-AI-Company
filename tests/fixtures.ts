@@ -2,6 +2,53 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { findRepoRoot } from "@adapters/root";
+import type { Db } from "@adapters/db/client";
+import {
+  currentTemplateVersion, ensureTemplateVersion, getTemplateVersion,
+  upsertTemplateVariantQa, recordTemplateVisualQa, decideTemplateVersion,
+  latestPostRender, attachPostRenderVisualQa,
+} from "@adapters/db/store";
+import { TEMPLATES } from "@core/templates/index";
+
+/** テスト用の合格visual QA(critical 0)。本番経路には注入しない。テスト設定でのみ使用 */
+export const PASS_VISUAL_QA = {
+  kind: "visual_qa" as const, result: "pass" as const,
+  criticalIssues: [], minorIssues: [], revisionInstructions: [],
+  pageFindings: [{ page: 1, severity: "minor" as const, finding: "テスト設定(目視相当)" }],
+};
+
+/**
+ * テスト設定: テンプレート版の全variantに content/mechanical/visual QA(pass)を投入して承認可能にし、承認する。
+ * 実storeのゲート関数を通すため、ゲートを迂回しない(本番のfixed-passではない)。
+ */
+export function makeTemplateApprovable(db: Db, templateId: string): number {
+  const version = currentTemplateVersion(db, templateId);
+  const tv = getTemplateVersion(db, templateId, version) ?? ensureTemplateVersion(db, templateId);
+  const variants = (TEMPLATES as Record<string, { variants: readonly string[] }>)[templateId]!.variants;
+  for (const variant of variants) {
+    // variantごとに異なるlayoutId・画像ハッシュ(01〜05で全て相違 → 差分5)。CTAのみ共通
+    const layoutIds = [`cover-${variant}`, `p1-${variant}`, `p2-${variant}`, `p3-${variant}`, `p4-${variant}`, "cta"];
+    const pageHashes = layoutIds.map((_, i) => `${variant}-hash-${i}`);
+    upsertTemplateVariantQa(db, {
+      templateId, version, variant, fingerprint: tv.fingerprint,
+      contentQaResult: "pass", mechanicalQaResult: "pass", previewComplete: true, pageCount: 6,
+      fixtureKind: "fictional", rights: "架空データ・Bloom-L所有素材", layoutIds, pageHashes,
+    });
+    recordTemplateVisualQa(db, { templateId, version, variant, visualQa: PASS_VISUAL_QA });
+  }
+  return version;
+}
+
+export function approveTemplate(db: Db, templateId: string): void {
+  makeTemplateApprovable(db, templateId);
+  decideTemplateVersion(db, { templateId, version: currentTemplateVersion(db, templateId), decision: "approved" }, "owner");
+}
+
+/** テスト設定: 投稿の最新post_renderへ視覚QA(pass)を紐付ける(exportゲートを満たすため) */
+export function passPostRenderVisualQa(db: Db, postId: string): void {
+  const render = latestPostRender(db, postId);
+  if (render) attachPostRenderVisualQa(db, render.id, PASS_VISUAL_QA);
+}
 
 /**
  * 実在する許可証跡ファイル(P1-3: evidencePathは実在ファイルのみ受け付けるため)。

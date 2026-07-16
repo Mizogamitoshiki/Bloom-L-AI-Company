@@ -129,3 +129,8 @@ function loadBrandTokensRaw(root: string): BrandTokens {
   const parsed = JSON.parse(raw) as BrandTokens;
   return { placeholder: parsed.placeholder !== false, colors: parsed.colors ?? {} };
 }
+
+/** V4-D: モデルプロファイルの参照表示用(値の直接編集はUIで行わない) */
+export function loadModelProfilesRaw(root: string = findRepoRoot()): unknown {
+  return parseYaml(readFileSync(path.join(root, "config", "model-profiles.yaml"), "utf8"));
+}

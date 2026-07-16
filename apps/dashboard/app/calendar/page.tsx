@@ -50,7 +50,7 @@ export default function CalendarPage(): JSX.Element {
     try {
       const res = await fetch(`/api/posts/${postId}/schedule`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
         body: JSON.stringify({ plannedDate: next }),
       });
       const json: unknown = await res.json();

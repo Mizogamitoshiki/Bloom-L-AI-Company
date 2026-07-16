@@ -187,6 +187,212 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    id: 4,
+    name: "v4-metrics-meetings-fk",
+    precheck(sqlite) {
+      const problems: string[] = [];
+      const orphanMetrics = count(
+        sqlite,
+        "select count(*) n from post_metrics m where not exists (select 1 from posts p where p.id = m.post_id)",
+      );
+      if (orphanMetrics > 0) {
+        problems.push(
+          `post_metricsに投稿の存在しない行が${orphanMetrics}件あります。修復方法: select id, post_id from post_metrics where post_id not in (select id from posts) で確認し、正しいpost_idへ修正するか手動削除してください`,
+        );
+      }
+      const orphanMinutes = count(
+        sqlite,
+        "select count(*) n from meetings mt where mt.minutes_artifact_id is not null and not exists (select 1 from artifacts a where a.id = mt.minutes_artifact_id)",
+      );
+      if (orphanMinutes > 0) {
+        problems.push(
+          `meetingsに存在しない成果物を参照する行が${orphanMinutes}件あります。修復方法: 該当行のminutes_artifact_idを確認し修正するかNULLにしてください`,
+        );
+      }
+      if (problems.length > 0) {
+        throw new MigrationError(
+          `マイグレーションを停止しました(データは変更していません)。\n${problems.map((p) => `- ${p}`).join("\n")}\n修復後に再度起動してください。`,
+        );
+      }
+    },
+    up(sqlite) {
+      // post_metrics: post_id へFK + index。V4-Cで代表者が3日/7日後に手入力する実績値
+      sqlite.exec(`
+        CREATE TABLE post_metrics_new (
+          id TEXT PRIMARY KEY,
+          post_id TEXT NOT NULL REFERENCES posts(id),
+          measured_at TEXT NOT NULL,
+          window_days INTEGER,
+          reach INTEGER, profile_views INTEGER, saves INTEGER, shares INTEGER,
+          comments INTEGER, dm_starts INTEGER, follower_count INTEGER, note TEXT,
+          created_at TEXT
+        );
+        INSERT INTO post_metrics_new (id, post_id, measured_at, reach, profile_views, saves, shares, comments, dm_starts, follower_count, note)
+          SELECT id, post_id, measured_at, reach, profile_views, saves, shares, comments, dm_starts, follower_count, note FROM post_metrics;
+        DROP TABLE post_metrics;
+        ALTER TABLE post_metrics_new RENAME TO post_metrics;
+        CREATE INDEX IF NOT EXISTS post_metrics_post_idx ON post_metrics(post_id, window_days);
+      `);
+      // meetings: minutes_artifact_id へFK + 期間列 + 参加者。議事録本体は meeting_minutes 成果物
+      sqlite.exec(`
+        CREATE TABLE meetings_new (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          held_on TEXT NOT NULL,
+          period_start TEXT,
+          period_end TEXT,
+          participants_json TEXT,
+          agenda_json TEXT,
+          decisions_json TEXT,
+          minutes_artifact_id TEXT REFERENCES artifacts(id),
+          created_at TEXT
+        );
+        INSERT INTO meetings_new (id, kind, held_on, agenda_json, decisions_json, minutes_artifact_id)
+          SELECT id, kind, held_on, agenda_json, decisions_json, minutes_artifact_id FROM meetings;
+        DROP TABLE meetings;
+        ALTER TABLE meetings_new RENAME TO meetings;
+        CREATE INDEX IF NOT EXISTS meetings_kind_idx ON meetings(kind, held_on);
+      `);
+    },
+  },
+  {
+    id: 5,
+    name: "v4-unique-metrics-meetings",
+    precheck(sqlite) {
+      const duplicateMetrics = count(
+        sqlite,
+        "select count(*) n from (select post_id, window_days from post_metrics where window_days is not null group by post_id, window_days having count(*) > 1)",
+      );
+      const duplicateMeetings = count(
+        sqlite,
+        "select count(*) n from (select kind, period_end from meetings where period_end is not null group by kind, period_end having count(*) > 1)",
+      );
+      const problems: string[] = [];
+      if (duplicateMetrics > 0) {
+        problems.push(`post_metricsに同じ投稿・計測窓の重複が${duplicateMetrics}組あります。各組で残す計測値を確認し、重複行を手動整理してください`);
+      }
+      if (duplicateMeetings > 0) {
+        problems.push(`meetingsに同じ種別・期間終了日の重複が${duplicateMeetings}組あります。最新の議事録を残すよう手動整理してください`);
+      }
+      if (problems.length > 0) {
+        throw new MigrationError(`マイグレーションを停止しました(データは変更していません)。\n${problems.map((p) => `- ${p}`).join("\n")}`);
+      }
+    },
+    up(sqlite) {
+      sqlite.exec(`
+        DROP INDEX IF EXISTS post_metrics_post_idx;
+        CREATE UNIQUE INDEX IF NOT EXISTS post_metrics_post_window_uq ON post_metrics(post_id, window_days);
+        CREATE UNIQUE INDEX IF NOT EXISTS meetings_kind_period_uq ON meetings(kind, period_end);
+      `);
+    },
+  },
+  {
+    // V4.5: 公開停止ガード。テンプレート版承認(template_versions)と投稿レンダリング記録(post_renders)。
+    // 新規テーブルのみ(既存データ・既存export記録は不変)。1トランザクション・再実行可能・FK整合。
+    id: 6,
+    name: "v45-template-versions-post-renders",
+    up(sqlite) {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS template_versions (
+          id TEXT PRIMARY KEY,
+          template_id TEXT NOT NULL,
+          family TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          fingerprint TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL,
+          decided_at TEXT,
+          decided_by TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS template_versions_tpl_ver_uq ON template_versions(template_id, version);
+
+        CREATE TABLE IF NOT EXISTS post_renders (
+          id TEXT PRIMARY KEY,
+          post_id TEXT NOT NULL REFERENCES posts(id),
+          spec_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+          template_id TEXT NOT NULL,
+          template_version INTEGER NOT NULL,
+          variant TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          design_qa_result TEXT,
+          design_qa_json TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS post_renders_post_idx ON post_renders(post_id, created_at);
+      `);
+    },
+  },
+  {
+    // V4.5 v2: 紫苑visual QAの接続。post_rendersにvisual QA列を追加し、
+    // テンプレート版×variantのQA/プレビュー状態(template_variant_qa)を新設。
+    // 追加のみ(既存データ・既存post_renders・既存export記録は不変)。1トランザクション・再実行可能・FK整合。
+    id: 7,
+    name: "v45-visual-qa-variant-gate",
+    up(sqlite) {
+      addColumnIfMissing(sqlite, "post_renders", "visual_qa_result", "visual_qa_result TEXT");
+      addColumnIfMissing(sqlite, "post_renders", "visual_qa_json", "visual_qa_json TEXT");
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS template_variant_qa (
+          id TEXT PRIMARY KEY,
+          template_id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          variant TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          content_qa_result TEXT,
+          mechanical_qa_result TEXT,
+          visual_qa_result TEXT,
+          visual_qa_json TEXT,
+          preview_complete INTEGER NOT NULL DEFAULT 0,
+          page_count INTEGER,
+          fixture_kind TEXT,
+          rights TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS template_variant_qa_uq ON template_variant_qa(template_id, version, variant);
+      `);
+    },
+  },
+  {
+    // V4.5 v3: variant差分の構造判定のため、各variantのlayoutIdと画像ハッシュを保存する。追加のみ。
+    id: 8,
+    name: "v45-variant-layout-hashes",
+    up(sqlite) {
+      addColumnIfMissing(sqlite, "template_variant_qa", "layout_ids_json", "layout_ids_json TEXT");
+      addColumnIfMissing(sqlite, "template_variant_qa", "page_hashes_json", "page_hashes_json TEXT");
+    },
+  },
+  {
+    // V5: Metaへ公開した事実をローカル記録より先に永続化し、再実行で二重投稿しない。
+    // アクセストークン、IG user ID等の秘密情報は保存しない。
+    id: 9,
+    name: "v5-instagram-publish-jobs",
+    up(sqlite) {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS instagram_publish_jobs (
+          id TEXT PRIMARY KEY,
+          post_id TEXT NOT NULL REFERENCES posts(id),
+          idempotency_key TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          status TEXT NOT NULL,
+          media_urls_json TEXT NOT NULL,
+          child_container_ids_json TEXT,
+          carousel_container_id TEXT,
+          instagram_media_id TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          published_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS instagram_publish_jobs_idem_uq ON instagram_publish_jobs(idempotency_key);
+        CREATE INDEX IF NOT EXISTS instagram_publish_jobs_post_idx ON instagram_publish_jobs(post_id, created_at);
+      `);
+    },
+  },
 ];
 
 /**

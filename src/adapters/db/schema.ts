@@ -224,3 +224,134 @@ export const reports = sqliteTable("reports", {
   periodEnd: text("period_end").notNull(),
   bodyArtifactId: text("body_artifact_id").references(() => artifacts.id),
 });
+
+// V4: 実績値(代表者が3日/7日後に手入力)。migration v4-metrics-meetings-fk と同期
+export const postMetrics = sqliteTable(
+  "post_metrics",
+  {
+    id: text("id").primaryKey(),
+    postId: text("post_id").notNull().references(() => posts.id),
+    measuredAt: text("measured_at").notNull(),
+    windowDays: integer("window_days"),
+    reach: integer("reach"),
+    profileViews: integer("profile_views"),
+    saves: integer("saves"),
+    shares: integer("shares"),
+    comments: integer("comments"),
+    dmStarts: integer("dm_starts"),
+    followerCount: integer("follower_count"),
+    note: text("note"),
+    createdAt: text("created_at"),
+  },
+  (t) => [uniqueIndex("post_metrics_post_window_uq").on(t.postId, t.windowDays)],
+);
+
+// V4: 会議(議事録本体は meeting_minutes 成果物)。migration と同期
+export const meetings = sqliteTable(
+  "meetings",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind").notNull(), // weekly | monthly
+    heldOn: text("held_on").notNull(),
+    periodStart: text("period_start"),
+    periodEnd: text("period_end"),
+    participantsJson: text("participants_json"),
+    agendaJson: text("agenda_json"),
+    decisionsJson: text("decisions_json"),
+    minutesArtifactId: text("minutes_artifact_id").references(() => artifacts.id),
+    createdAt: text("created_at"),
+  },
+  (t) => [
+    index("meetings_kind_idx").on(t.kind, t.heldOn),
+    uniqueIndex("meetings_kind_period_uq").on(t.kind, t.periodEnd),
+  ],
+);
+
+// V4.5: テンプレート版の承認管理(公開停止ガード)。initはdraft、ownerだけが承認できる
+export const templateVersions = sqliteTable(
+  "template_versions",
+  {
+    id: text("id").primaryKey(),
+    templateId: text("template_id").notNull(),
+    family: text("family").notNull(),
+    version: integer("version").notNull(),
+    status: text("status").notNull().default("draft"), // draft | approved | rejected | revision_requested
+    fingerprint: text("fingerprint").notNull(),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+    decidedAt: text("decided_at"),
+    decidedBy: text("decided_by"),
+  },
+  (t) => [uniqueIndex("template_versions_tpl_ver_uq").on(t.templateId, t.version)],
+);
+
+// V4.5: 投稿ごとのレンダリング記録(使用したテンプレート版・variant・fingerprint・design QA結果)
+export const postRenders = sqliteTable(
+  "post_renders",
+  {
+    id: text("id").primaryKey(),
+    postId: text("post_id").notNull().references(() => posts.id),
+    specArtifactId: text("spec_artifact_id").notNull().references(() => artifacts.id),
+    templateId: text("template_id").notNull(),
+    templateVersion: integer("template_version").notNull(),
+    variant: text("variant").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    designQaResult: text("design_qa_result"), // pass | fail | null
+    designQaJson: text("design_qa_json"),
+    visualQaResult: text("visual_qa_result"), // pass | fail | null(未実施)。V4.5 v2
+    visualQaJson: text("visual_qa_json"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("post_renders_post_idx").on(t.postId, t.createdAt)],
+);
+
+// V4.5 v2: テンプレート版×variantごとのQA/プレビュー状態(承認ゲートの根拠)
+export const templateVariantQa = sqliteTable(
+  "template_variant_qa",
+  {
+    id: text("id").primaryKey(),
+    templateId: text("template_id").notNull(),
+    version: integer("version").notNull(),
+    variant: text("variant").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    contentQaResult: text("content_qa_result"), // pass | fail | null
+    mechanicalQaResult: text("mechanical_qa_result"), // pass | fail | null
+    visualQaResult: text("visual_qa_result"), // pass | fail | null(未実施)
+    visualQaJson: text("visual_qa_json"),
+    previewComplete: integer("preview_complete").notNull().default(0),
+    pageCount: integer("page_count"),
+    fixtureKind: text("fixture_kind"), // fictional | real
+    rights: text("rights"),
+    layoutIdsJson: text("layout_ids_json"), // V4.5 v3: 各ページのlayoutId(JSON)
+    pageHashesJson: text("page_hashes_json"), // V4.5 v3: 各ページPNGのSHA-256(JSON)
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("template_variant_qa_uq").on(t.templateId, t.version, t.variant)],
+);
+
+// V5: Instagram公式API公開ジョブ。アクセストークン等の秘密情報は絶対に保存しない。
+export const instagramPublishJobs = sqliteTable(
+  "instagram_publish_jobs",
+  {
+    id: text("id").primaryKey(),
+    postId: text("post_id").notNull().references(() => posts.id),
+    idempotencyKey: text("idempotency_key").notNull(),
+    mode: text("mode").notNull(), // dry_run | live
+    status: text("status").notNull(), // dry_run | publishing | remote_published | published | failed
+    mediaUrlsJson: text("media_urls_json").notNull(),
+    childContainerIdsJson: text("child_container_ids_json"),
+    carouselContainerId: text("carousel_container_id"),
+    instagramMediaId: text("instagram_media_id"),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    publishedAt: text("published_at"),
+  },
+  (t) => [
+    uniqueIndex("instagram_publish_jobs_idem_uq").on(t.idempotencyKey),
+    index("instagram_publish_jobs_post_idx").on(t.postId, t.createdAt),
+  ],
+);

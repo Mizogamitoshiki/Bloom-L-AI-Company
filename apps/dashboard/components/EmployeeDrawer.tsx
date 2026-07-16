@@ -39,7 +39,7 @@ export function EmployeeDrawer({ employeeId, onClose }: { employeeId: string; on
     try {
       const res = await fetch(`/api/tasks/${taskId}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
         body: JSON.stringify({ action }),
       });
       const json: unknown = await res.json();

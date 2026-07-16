@@ -80,7 +80,7 @@ describe("V3-A: QA構造ルールと禁止語(通常コード検査)", () => {
     const qa = qaTask(postId);
     const bad = { ...QA_PASS, checklist: [...QA_PASS.checklist, { item: "権利", ok: false }] };
     expect(() => submitQa(opened.db, qa, bad, "shion")).toThrow(/不合格項目/);
-  });
+  }, 60_000); // Sharp/Satoriを使うため、全スイート並列時も既定5秒に依存させない
 
   it("passなのにissues(重大指摘)が残ると拒否される。notes(軽微)は両立できる", async () => {
     const postId = makeHowtoPost();

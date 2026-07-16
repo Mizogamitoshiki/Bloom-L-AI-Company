@@ -5,6 +5,32 @@ interface PixelAvatarProps {
   ceo?: boolean;
   /** 社員ごとに髪型・髪色を固定するための安定したID */
   seed?: string;
+  /** オフィス内を歩く場合は、顔クロップではなく全身SVGを描画する。 */
+  fullBody?: boolean;
+}
+
+/**
+ * V4.6: 代表者が確認したオフィス参照画像から切り出した顔向きの対応表。
+ * 50pxの小さなクロップをそのまま拡大し、補間を切ってピクセルの輪郭を守る。
+ * 未知のseedは従来の決定的SVGへフォールバックする。
+ */
+const PORTRAIT_BY_SEED: Record<string, string> = {
+  emp_aoi: "/office-v46/faces/05_aoi_face.png",
+  emp_ren: "/office-v46/faces/06_riku_face.png",
+  emp_rin: "/office-v46/faces/04_minato_face.png",
+  emp_sora: "/office-v46/faces/07_yuuki_face.png",
+  emp_kotoha: "/office-v46/faces/13_kaoru_face.png",
+  emp_tsumugi: "/office-v46/faces/14_momoka_face.png",
+  emp_shion: "/office-v46/faces/09_haru_face.png",
+  emp_minato: "/office-v46/faces/08_sakura_face.png",
+  emp_hinata: "/office-v46/faces/12_meeting_right_face.png",
+  "bloom-manager": "/office-v46/faces/03_ceo_face.png",
+  "bloom-owner": "/office-v46/faces/03_ceo_face.png",
+};
+
+/** seedに対応する顔クロップのパス(なければnull)。歩行キャラの頭に使う */
+export function portraitSrc(seed: string): string | null {
+  return PORTRAIT_BY_SEED[seed] ?? null;
 }
 
 const HAIR_PALETTES = [
@@ -90,7 +116,17 @@ function Hair({ style, colors }: { style: number; colors: (typeof HAIR_PALETTES)
  * 社員用の32×40オリジナルSVGピクセルアバター。
  * 外部画像に依存せず、seedから同じ人物デザインを決定的に再現する。
  */
-export function PixelAvatar({ hue, ceo = false, seed = String(hue) }: PixelAvatarProps): JSX.Element {
+export function PixelAvatar({ hue, ceo = false, seed = String(hue), fullBody = false }: PixelAvatarProps): JSX.Element {
+  const portrait = fullBody ? undefined : PORTRAIT_BY_SEED[seed];
+  if (portrait) {
+    return (
+      <span className="sprite sprite--employee sprite--portrait" aria-hidden="true" data-avatar-seed={seed}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={portrait} alt="" width="50" height="50" draggable={false} />
+      </span>
+    );
+  }
+
   const hash = hashSeed(seed);
   const hair = ceo ? HAIR_PALETTES[0] : (HAIR_PALETTES[hash % HAIR_PALETTES.length] ?? HAIR_PALETTES[0]);
   const skin = SKIN_PALETTES[(hash >>> 3) % SKIN_PALETTES.length] ?? SKIN_PALETTES[0];
@@ -162,5 +198,98 @@ export function PixelAvatar({ hue, ceo = false, seed = String(hue) }: PixelAvata
       <rect x="8" y="39" width="7" height="1" fill="#080d17" />
       <rect x="17" y="39" width="7" height="1" fill="#080d17" />
     </svg>
+  );
+}
+
+/**
+ * V4.6.2: ポケモン ダイヤモンド・パール風の「オーバーワールド・ドット絵キャラ」。
+ * 上から見た3/4視点の小さなピクセル人物。社員ごとに髪色・髪型・アクセントを固定し、
+ * 歩行時は2フレームの足パカでピクセルらしく動く(親の data-moving を利用)。
+ * 外部画像に依存せず、seed から決定的に同じ見た目を再現する。
+ */
+export function OverworldSprite({ seed, hue, ceo = false }: { seed: string; hue: number; ceo?: boolean }): JSX.Element {
+  const hash = hashSeed(seed);
+  const hair = ceo ? HAIR_PALETTES[0] : (HAIR_PALETTES[hash % HAIR_PALETTES.length] ?? HAIR_PALETTES[0]);
+  const skin = SKIN_PALETTES[(hash >>> 3) % SKIN_PALETTES.length] ?? SKIN_PALETTES[0];
+  const hairStyle = ceo ? 4 : (hash >>> 5) % 5;
+  const accent = ceo ? "#e0b64a" : `hsl(${hue} 60% 52%)`;
+  const jacket = ceo ? "#12233d" : "#1a3a63";
+  const jacketDark = ceo ? "#0a1526" : "#102a49";
+  // 髪の形(前髪の落ち方)を髪型で少し変える
+  const bangs =
+    hairStyle === 1 ? "M4 3H12V6H10V5H6V6H4Z" :
+    hairStyle === 2 ? "M4 3H12V7H11V5H5V7H4Z" :
+    hairStyle === 3 ? "M4 3H12V6H9V5H7V6H4Z" :
+    hairStyle === 4 ? "M4 3H12V5H4Z" :
+    "M4 3H12V6H10V5H8V6H6V5H4Z";
+  return (
+    <svg className="sprite sprite--pixel" viewBox="0 0 16 26" role="img" aria-hidden="true" focusable="false" shapeRendering="crispEdges" data-avatar-seed={seed}>
+      {/* 足元の影 */}
+      <ellipse cx="8" cy="24.4" rx="5" ry="1.5" fill="rgba(20,34,60,.28)" />
+      {/* 髪(後ろ) */}
+      <path d="M3 4H13V12H11V10H5V12H3Z" fill={hair.dark} />
+      {/* 顔 */}
+      <path d="M4 5H12V11H11V12H5V11H4Z" fill={skin.base} />
+      <path d="M5 6H11V8H5Z" fill={skin.light} opacity=".6" />
+      {/* 前髪(色) */}
+      <path d={bangs} fill={hair.base} />
+      <path d="M4 3H12V4H4Z" fill={hair.light} opacity=".7" />
+      {/* 目 */}
+      <rect x="6" y="8" width="1.4" height="2" fill="#16233a" />
+      <rect x="9" y="8" width="1.4" height="2" fill="#16233a" />
+      {/* ジャケット(体) */}
+      <path d="M4 12H12V20H4Z" fill={jacket} />
+      <path d="M4 12H8V20H4Z" fill={jacketDark} opacity=".55" />
+      {/* シャツ+アクセントの襟 */}
+      <path d="M7 12H9V18H7Z" fill="#f4f8fc" />
+      <path d="M7 12H9V14H7Z" fill={accent} />
+      {/* 腕(袖+手) */}
+      <rect x="2.6" y="13" width="1.8" height="5" fill={jacket} />
+      <rect x="11.6" y="13" width="1.8" height="5" fill={jacket} />
+      <rect x="2.6" y="18" width="1.8" height="1.4" fill={skin.base} />
+      <rect x="11.6" y="18" width="1.8" height="1.4" fill={skin.base} />
+      {/* 脚(2フレームの足パカ) */}
+      <g className="pw-legs pw-legs--a">
+        <rect x="5" y="20" width="2.2" height="4" fill="#132238" />
+        <rect x="8.8" y="21" width="2.2" height="3" fill="#0f1c2f" />
+      </g>
+      <g className="pw-legs pw-legs--b">
+        <rect x="5" y="21" width="2.2" height="3" fill="#0f1c2f" />
+        <rect x="8.8" y="20" width="2.2" height="4" fill="#132238" />
+      </g>
+    </svg>
+  );
+}
+
+/**
+ * V4.6+: オフィスを歩く「キャラクター」(顔クロップ版。旧V4.6デザイン)。
+ * DP風ドット絵に切り替えたため現在は未使用だが、参照用に残す。
+ */
+export function WalkingCharacter({ seed, hue }: { seed: string; hue: number }): JSX.Element {
+  const face = portraitSrc(seed);
+  if (!face) {
+    return <PixelAvatar hue={hue} seed={seed} fullBody />;
+  }
+  const accent = `hsl(${hue} 55% 46%)`;
+  // 外側に .sprite を付け、既存の状態別モーション(歩行・待機・作業・会議など)をそのまま受ける。
+  return (
+    <span className="sprite sprite--character" aria-hidden="true" data-char-seed={seed}>
+      <span className="office-char">
+        <span className="office-char__head">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={face} alt="" width={50} height={50} draggable={false} />
+        </span>
+        {/* 統一された小さな体(全社員共通のBloom-Lジャケット。アクセントだけ社員色) */}
+        <svg className="office-char__body" viewBox="0 0 24 22" role="img" aria-hidden="true" focusable="false" shapeRendering="crispEdges">
+          <path d="M4 4H9L12 7L15 4H20L22 8V21H2V8Z" fill="#16335c" />
+          <path d="M4 4H8L12 7L9 11L6 8V21H2V8Z" fill="#274b78" />
+          <path d="M10 4H14L13 21H11Z" fill="#f5f8fc" />
+          <path d="M11 5H13L12 9H12Z" fill={accent} />
+          <rect x="10" y="10" width="4" height="2" fill={accent} />
+          <rect x="2" y="17" width="3" height="4" fill="#e7b48f" />
+          <rect x="19" y="17" width="3" height="4" fill="#e7b48f" />
+        </svg>
+      </span>
+    </span>
   );
 }

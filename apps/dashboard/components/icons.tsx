@@ -163,3 +163,24 @@ export const IconSparkle = (p: IconProps) => (
     <path d="m6 6 3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" />
   </Svg>
 );
+
+export const IconExport = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3v12M8 7l4-4 4 4" />
+    <path d="M5 13v6a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-6" />
+  </Svg>
+);
+export const IconMeeting = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="7" r="3" />
+    <path d="M5 21v-1a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v1" />
+    <path d="M2 12h3M19 12h3" />
+  </Svg>
+);
+export const IconTemplate = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="7" height="18" rx="1" />
+    <rect x="14" y="3" width="7" height="8" rx="1" />
+    <rect x="14" y="15" width="7" height="6" rx="1" />
+  </Svg>
+);

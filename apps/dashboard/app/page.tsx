@@ -60,7 +60,7 @@ export default function HomePage(): JSX.Element {
   async function resume(): Promise<void> {
     const res = await fetch("/api/system", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
       body: JSON.stringify({ action: "resume_generation" }),
     });
     if (res.ok) await poll();

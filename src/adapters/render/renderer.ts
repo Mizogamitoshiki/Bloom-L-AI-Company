@@ -9,12 +9,14 @@
 import satori from "satori";
 import sharp from "sharp";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { CarouselSpec } from "../../core/schemas";
-import { templateFor } from "../../core/templates/index";
-import { CANVAS, type BrandColors, type SatoriNode } from "../../core/templates/shared";
+import { templateFor, type TemplateRenderAssets } from "../../core/templates/index";
+import { CANVAS, type SatoriNode } from "../../core/templates/components";
 import { loadFonts } from "./fonts";
-import { loadBrandTokens } from "../config";
+import { loadTheme } from "./theme";
+import { computeFingerprint } from "./fingerprint";
 
 export interface SlotOverflow {
   slotPath: string;
@@ -32,19 +34,6 @@ export class OverflowError extends Error {
     );
     this.name = "OverflowError";
   }
-}
-
-function brandColors(): BrandColors {
-  const tokens = loadBrandTokens();
-  const c = tokens.colors;
-  return {
-    primary: c.primary ?? "#2f6f4f",
-    primaryDark: c.primaryDark ?? "#1e4a34",
-    accent: c.accent ?? "#e8a13a",
-    surface: c.surface ?? "#f6f3ec",
-    ink: c.ink ?? "#22281f",
-    inkMuted: c.inkMuted ?? "#5c6357",
-  };
 }
 
 const svgHeightRe = /<svg[^>]*\bheight="([\d.]+)"/;
@@ -87,28 +76,61 @@ export async function measureSlotOverflows(spec: CarouselSpec): Promise<SlotOver
 export interface RenderResult {
   files: string[]; // 書き出したPNGの絶対パス(ページ順)
   pageCount: number;
+  templateId: string;
+  variant: string;
+  /** 各ページのlayoutId(variant差分の構造判定に使う) */
+  layoutIds: string[];
+  /** 各ページPNGのSHA-256(variant差分の画像ハッシュ判定に使う) */
+  pageHashes: string[];
+  /** レンダリングに使ったテンプレート版のfingerprint(版承認・整合チェックの根拠) */
+  fingerprint: string;
+  /** 実績画像を埋め込んだ場合の元素材hash。specとの一致をdesign QAで検査する */
+  embeddedAssetSha256?: string;
 }
 
-/** カルーセル一式をPNGへレンダリング。事前にmeasureSlotOverflowsで検査し、超過時はOverflowError */
-export async function renderCarousel(spec: CarouselSpec, outDir: string): Promise<RenderResult> {
+/**
+ * カルーセル一式をPNGへレンダリング。事前にmeasureSlotOverflowsで検査し、超過時はOverflowError。
+ * templateVersion はfingerprint算出に使う(既定=1。版管理は呼び出し側が指定)。
+ */
+export async function renderCarousel(
+  spec: CarouselSpec,
+  outDir: string,
+  opts: { templateVersion?: number; assets?: TemplateRenderAssets } = {},
+): Promise<RenderResult> {
   const overflows = await measureSlotOverflows(spec);
   if (overflows.length > 0) throw new OverflowError(overflows);
 
   const fonts = loadFonts();
-  const colors = brandColors();
+  const theme = loadTheme();
   const template = templateFor(spec.templateId);
-  const pages = template.buildPages(spec, colors);
+  const variant = template.pickVariant(spec);
+  const templateVersion = opts.templateVersion ?? 1;
+  const fingerprint = computeFingerprint(spec.templateId, templateVersion, theme);
+  if (spec.templateId === "tpl-portfolio" && spec.portfolioMedia.mode === "real_screenshot") {
+    if (!opts.assets?.portfolioImageDataUri) throw new Error("実績画像本体がレンダラーへ安全に引き渡されていません");
+    if (opts.assets.portfolioAssetSha256 !== spec.portfolioMedia.assetSha256) {
+      throw new Error("実績画像のhashがspecと一致しません(差し替えまたは不正な素材)");
+    }
+  }
+  const pages = template.buildPages(spec, theme, variant, opts.assets);
   if (pages.length !== template.expectedPages(spec)) {
     throw new Error(`ページ数が期待値と不一致: ${pages.length} / ${template.expectedPages(spec)}`);
   }
   mkdirSync(outDir, { recursive: true });
 
   const files: string[] = [];
+  const layoutIds: string[] = [];
+  const pageHashes: string[] = [];
   for (let i = 0; i < pages.length; i++) {
     // eslint-disable-next-line no-await-in-loop
-    const svg = await satori(pages[i] as never, { width: CANVAS.width, height: CANVAS.height, fonts } as never);
+    const svg = await satori(pages[i]!.node as never, { width: CANVAS.width, height: CANVAS.height, fonts } as never);
     // eslint-disable-next-line no-await-in-loop
-    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    const png = await sharp(Buffer.from(svg))
+      .flatten({ background: "#ffffff" })
+      .removeAlpha()
+      .toColourspace("srgb")
+      .png()
+      .toBuffer();
     // eslint-disable-next-line no-await-in-loop
     const meta = await sharp(png).metadata();
     if (meta.width !== CANVAS.width || meta.height !== CANVAS.height) {
@@ -117,6 +139,19 @@ export async function renderCarousel(spec: CarouselSpec, outDir: string): Promis
     const file = path.join(outDir, `${String(i + 1).padStart(2, "0")}.png`);
     writeFileSync(file, png);
     files.push(file);
+    layoutIds.push(pages[i]!.layoutId);
+    pageHashes.push(createHash("sha256").update(png).digest("hex"));
   }
-  return { files, pageCount: pages.length };
+  return {
+    files,
+    pageCount: pages.length,
+    templateId: spec.templateId,
+    variant,
+    layoutIds,
+    pageHashes,
+    fingerprint,
+    ...(spec.templateId === "tpl-portfolio" && spec.portfolioMedia.mode === "real_screenshot"
+      ? { embeddedAssetSha256: spec.portfolioMedia.assetSha256 }
+      : {}),
+  };
 }

@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { carouselSpecSchema, slidesSchema, type CarouselSpec } from "@core/schemas";
-import { enumerateSlots, SLOT_DEFS } from "@core/templates/tpl-howto";
+import { enumerateSlots } from "@core/templates/tpl-howto";
 import { measureSlotOverflows, renderCarousel, OverflowError } from "@adapters/render/renderer";
 import sharp from "sharp";
 
@@ -39,8 +39,8 @@ describe("スロット文字数(第1層・Zod)", () => {
 
   it("enumerateSlotsが全テキストスロットを列挙する", () => {
     const slots = enumerateSlots(SPEC);
-    // cover.title + cover.subtitle + 3ページ×2 + cta = 9
-    expect(slots).toHaveLength(9);
+    // cover.title + cover.subtitle + 3ページ×(heading/body/summary) + cta = 12
+    expect(slots).toHaveLength(12);
     expect(slots.map((s) => s.slotPath)).toContain("pages[2].body");
   });
 });
@@ -66,17 +66,17 @@ describe("文字あふれ実測(第2層・Satori)", () => {
     const overflows = await measureSlotOverflows(tricky);
     expect(overflows.length).toBeGreaterThan(0);
     expect(overflows[0]!.slotPath).toBe("pages[0].body");
-    expect(overflows[0]!.measuredHeight).toBeGreaterThan(SLOT_DEFS.pageBody.maxHeight);
+    expect(overflows[0]!.measuredHeight).toBeGreaterThan(overflows[0]!.maxHeight);
   });
 });
 
 describe("レンダリング(Sharp出力)", () => {
-  it("表紙+本文3+CTA=5枚の1080×1350 PNGが生成される", async () => {
+  it("表紙+本文3+まとめ+CTA=6枚の1080×1350 PNGが生成される", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "bloom-render-"));
     try {
       const result = await renderCarousel(SPEC, dir);
-      expect(result.pageCount).toBe(5);
-      expect(result.files).toHaveLength(5);
+      expect(result.pageCount).toBe(6);
+      expect(result.files).toHaveLength(6);
       const meta = await sharp(result.files[0]!).metadata();
       expect(meta.width).toBe(1080);
       expect(meta.height).toBe(1350);

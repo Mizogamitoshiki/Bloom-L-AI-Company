@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
   body_artifact_id TEXT
 );
+CREATE TABLE IF NOT EXISTS instagram_publish_jobs (
+  id TEXT PRIMARY KEY, post_id TEXT NOT NULL REFERENCES posts(id), idempotency_key TEXT NOT NULL,
+  mode TEXT NOT NULL, status TEXT NOT NULL, media_urls_json TEXT NOT NULL,
+  child_container_ids_json TEXT, carousel_container_id TEXT, instagram_media_id TEXT,
+  error_code TEXT, error_message TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, published_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS instagram_publish_jobs_idem_uq ON instagram_publish_jobs(idempotency_key);
+CREATE INDEX IF NOT EXISTS instagram_publish_jobs_post_idx ON instagram_publish_jobs(post_id, created_at);
 `;
 
 export interface OpenedDb {
