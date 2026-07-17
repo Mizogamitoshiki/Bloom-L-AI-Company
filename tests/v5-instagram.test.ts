@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -11,7 +11,7 @@ import {
 import { renderPost } from "@adapters/render/render-post";
 import { loadInstagramConfig, publicInstagramConfig } from "@adapters/instagram/config";
 import { MetaInstagramClient, type InstagramPublishPlan } from "@adapters/instagram/meta-client";
-import { getInstagramReadiness, publishInstagramPost } from "@adapters/instagram/publish";
+import { getInstagramReadiness, publishInstagramPost, runInstagramDryRun } from "@adapters/instagram/publish";
 import { approveTemplate, COPY, passPostRenderVisualQa, PLAN, QA_PASS } from "./fixtures";
 
 const LIVE_ENV = {
@@ -29,6 +29,13 @@ describe("V5 Instagram設定とMeta client", () => {
     expect(JSON.stringify(safe)).not.toContain("test-token");
     expect(safe.liveReady).toBe(false);
     expect(safe.missing.join(" ")).toMatch(/公開HTTPS/);
+  });
+
+  it("Vercel Blob設定済みならMETA_MEDIA_BASE_URLなしでもliveReadyになる", () => {
+    const env = { ...LIVE_ENV, META_MEDIA_BASE_URL: "" };
+    const ready = getInstagramReadiness(env, { mediaStorageConfigured: true });
+    expect(ready.liveReady).toBe(true);
+    expect(ready.missing.join(" ")).not.toContain("META_MEDIA_BASE_URL");
   });
 
   it("公式カルーセル手順: 子コンテナ→親CAROUSEL→media_publish", async () => {
@@ -78,6 +85,8 @@ describe("V5 Instagram公開統合", () => {
     decidePost(opened.db, postId, "approved", null, "owner");
     approveTemplate(opened.db, "tpl-howto");
     exportPost(opened.db, postId, "owner");
+    // V5.3: 実投稿には、現在の画像URL・captionと一致するdry-run記録が必須。
+    runInstagramDryRun(opened.db, postId, "owner", { env: LIVE_ENV });
   }, 60_000);
 
   afterEach(() => {
@@ -112,8 +121,9 @@ describe("V5 Instagram公開統合", () => {
 
   it("live成功はmeta_apiで記録し、再実行はMetaを呼ばず冪等", async () => {
     const client = { publish: vi.fn(async () => ({ childContainerIds: ["c1", "c2"], containerId: "carousel-1", instagramMediaId: "ig-123" })) };
-    const first = await publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client });
-    const second = await publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client });
+    const confirmation = { confirmedPostId: postId, confirmedTitle: "V5公開テスト" };
+    const first = await publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client, confirmation });
+    const second = await publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client, confirmation });
     expect(first.status).toBe("published");
     expect(second.skipped).toBe(true);
     expect(client.publish).toHaveBeenCalledTimes(1);
@@ -125,11 +135,12 @@ describe("V5 Instagram公開統合", () => {
 
   it("通信結果が不明な失敗は秘密を保存せず、二重投稿防止で再試行を拒否", async () => {
     const client = { publish: vi.fn(async () => { throw new Error(`network failed ${LIVE_ENV.META_ACCESS_TOKEN}`); }) };
-    await expect(publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client })).rejects.toThrow(/二重投稿防止/);
+    const confirmation = { confirmedPostId: postId, confirmedTitle: "V5公開テスト" };
+    await expect(publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client, confirmation })).rejects.toThrow(/二重投稿防止/);
     const job = opened.db.select().from(t.instagramPublishJobs).get()!;
     expect(job.status).toBe("needs_reconciliation");
     expect(JSON.stringify(job)).not.toContain(String(LIVE_ENV.META_ACCESS_TOKEN));
-    await expect(publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client })).rejects.toThrow(/自動再試行しません/);
+    await expect(publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client, confirmation })).rejects.toThrow(/自動再試行しません/);
     expect(client.publish).toHaveBeenCalledTimes(1);
   }, 60_000);
 
@@ -137,5 +148,30 @@ describe("V5 Instagram公開統合", () => {
     const ready = getInstagramReadiness({});
     expect(ready.mode).toBe("disabled");
     expect(ready.externalSendEnabled).toBe(false);
+  });
+
+  it("liveはタイトル二段階確認なし・不一致を外部通信前に拒否する", async () => {
+    const client = { publish: vi.fn(async () => ({ childContainerIds: [], containerId: "x", instagramMediaId: "y" })) };
+    await expect(publishInstagramPost(opened.db, postId, "owner", { env: LIVE_ENV, client })).rejects.toThrow(/二段階確認/);
+    await expect(publishInstagramPost(opened.db, postId, "owner", {
+      env: LIVE_ENV,
+      client,
+      confirmation: { confirmedPostId: postId, confirmedTitle: "別の投稿" },
+    })).rejects.toThrow(/二段階確認/);
+    expect(client.publish).not.toHaveBeenCalled();
+  });
+
+  it("画像またはcaption変更後は一致するdry-runがなければliveを拒否する", async () => {
+    const client = { publish: vi.fn(async () => ({ childContainerIds: [], containerId: "x", instagramMediaId: "y" })) };
+    const post = opened.db.select().from(t.posts).where(eq(t.posts.id, postId)).get()!;
+    const captionPath = path.join(ws, post.exportPath!.replace(/^data\/workspace\//, ""), "caption.txt");
+    const original = readFileSync(captionPath, "utf8");
+    writeFileSync(captionPath, original + "\n変更");
+    await expect(publishInstagramPost(opened.db, postId, "owner", {
+      env: LIVE_ENV,
+      client,
+      confirmation: { confirmedPostId: postId, confirmedTitle: "V5公開テスト" },
+    })).rejects.toThrow(/dry-run/);
+    expect(client.publish).not.toHaveBeenCalled();
   });
 });

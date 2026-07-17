@@ -98,6 +98,17 @@ V4(書き出しbundle・投稿済み記録・実績入力・週報/月報・議�
 27. `META_PUBLISH_MODE`は`disabled`を既定とし、`dry_run`は外部通信ゼロ、`live`は公開HTTPS画像URLと代表者の最終確認を必須にする
 23. 秘密情報は `pnpm check:secrets`(git管理下を走査)で継続検査。ブランドの success 色は AA(4.5:1)を満たす濃さ(`#157a41`)を使う
 
+## V5.4追補(2026-07-17 実装済み — クラウド対応基盤・移行準備のみ)
+
+V5.4(DB境界・PostgreSQL移行準備・export/import-check・Vercel安全ゲート・cloud認証ガード・cloud-readiness診断)を実装。**実デプロイ・PostgreSQL契約・実データ投入は行っていない。** 追加の不変条件:
+
+28. `DATABASE_PROVIDER` の既定は `sqlite`。postgresは接続実装が入るまでfail closedで停止し、「移行準備完了」以上の表現をしない。`DATABASE_URL` の値をログ・エラー文・UI・監査ログへ出さない
+29. Instagram liveは実行環境ゲート(`src/core/runtime.ts`)を通る。テスト/Vercel Preview環境では構造的に拒否(降格)し、Vercel productionは `ALLOW_LIVE_INSTAGRAM_PUBLISH=true` との二重条件。ローカル代表者環境の既存手順(V5.3)は変えない
+30. cloud実行(`VERCEL_ENV`検出 or `APP_RUNTIME_MODE=cloud`)でowner認証が未確定の間、変更系APIは共通境界(`assertOwnerRequest`)で全拒否。即席の簡易パスワード認証を実装しない
+31. `db-export` はreadonly接続のみ(openDb・migrationを通さない)。出力は決定的JSONL+SHA-256 manifest、tmp→atomic rename。移行データは `data/` 配下(gitignore)に置き、Gitへ追加しない
+32. importは全体1トランザクション・二重import拒否の設計を維持し、実接続の無い状態で「成功」と報告するテスト・コードを書かない
+33. E2Eの webServer は実`.env` へ依存させない(playwright.config.tsで `META_PUBLISH_MODE=disabled`・空トークンを明示固定)
+
 ## V4再監査追補(2026-07-15)
 
 24. owner専用POST APIはactor文字列だけを信用せず、UIが付ける確認ヘッダー・same-origin `Origin`・`Sec-Fetch-Site`を共通境界で検査する。ローカル単一利用のCSRF/誤操作防止であり、クラウド移行時はログイン/セッション認証へ置換する

@@ -8,7 +8,11 @@ export const dynamic = "force-dynamic";
 export async function GET(): Promise<NextResponse> {
   const storage = new VercelBlobStorage();
   return NextResponse.json(
-    { ...getInstagramReadiness(), storageProvider: storage.provider, storageConfigured: storage.isConfigured() },
+    {
+      ...getInstagramReadiness(process.env, { mediaStorageConfigured: storage.isConfigured() }),
+      storageProvider: storage.provider,
+      storageConfigured: storage.isConfigured(),
+    },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

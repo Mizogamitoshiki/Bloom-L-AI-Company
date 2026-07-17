@@ -143,3 +143,19 @@ pnpm company doctor   # 読み取りのみ。DBは書き換えない
   2. `pnpm company instagram-dry-run --post <id> --actor owner` — Metaへ送信せず投稿予定内容(画像順・caption・QA・テンプレ版)だけを確認
 - /publish 画面でも「公開画像を準備」「dry-runを実行」ボタンから同じ操作ができる(トークン値は表示されない)
 - 詳細・設定手順・障害時の停止方法は docs/25 §V5.2 を参照
+
+---
+
+## 9. V5.4 クラウド移行準備(ローカル運用は変わらない)
+
+- DBは引き続きSQLiteが正(`DATABASE_PROVIDER=sqlite` 既定)。`postgres` はまだ使えない(指定すると安全に停止する)
+- 移行データの作成と検証(すべて読み取り専用・実DBは変更されない):
+  ```bash
+  pnpm company db-export --actor owner          # data/backups/db-export/<日時>/ へJSONL+manifest
+  pnpm company db-export-verify --from <dir>    # SHA-256・件数・FK・重複PKの検証
+  pnpm company db-import-check --from <dir>     # PostgreSQL投入前チェック(実接続なし)
+  pnpm company cloud-readiness                  # 移行準備の診断(秘密値なし)
+  ```
+- 移行エクスポートは `data/` 配下(gitignore対象)。**Gitへ追加しない**
+- Vercel Preview環境ではInstagram実投稿が構造的に禁止される(設定ミスでも投稿されない)
+- 詳細・Vercel設定・rollback手順: [26-v54-vercel-cloud-readiness.md](26-v54-vercel-cloud-readiness.md)

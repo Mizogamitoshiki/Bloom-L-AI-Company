@@ -1,7 +1,17 @@
 import path from "node:path";
+import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+// dashboardはapps/dashboardを基準に起動するため、Next.js既定ではリポジトリ直下の.envを読まない。
+// company CLIと同じ設定元を見るよう、起動時にルート.envを明示的に読み込む。
+// 既にシェルで設定された値はNodeのloadEnvFile仕様により上書きしない。
+try {
+  loadEnvFile(path.join(repoRoot, ".env"));
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {

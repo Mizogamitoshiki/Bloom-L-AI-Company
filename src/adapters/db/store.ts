@@ -2094,6 +2094,14 @@ export interface PublishReadyItem {
   mediaUploadCount: number;
   /** V5.2: 最後にdry-runを実行した日時(audit由来。なければnull) */
   lastDryRunAt: string | null;
+  /** V5.3: 最新のInstagram公開ジョブ。曖昧な外部結果を画面で見落とさないための安全表示用。 */
+  instagramJob: {
+    id: string;
+    status: string;
+    mode: string;
+    instagramMediaId: string | null;
+    updatedAt: string;
+  } | null;
 }
 
 export function listPublishReady(db: Db): PublishReadyItem[] {
@@ -2133,6 +2141,18 @@ export function listPublishReady(db: Db): PublishReadyItem[] {
       .where(and(eq(t.auditLog.subjectId, post.id), eq(t.auditLog.action, "instagram_dry_run_report")))
       .orderBy(desc(t.auditLog.ts))
       .get();
+    const instagramJob = db
+      .select({
+        id: t.instagramPublishJobs.id,
+        status: t.instagramPublishJobs.status,
+        mode: t.instagramPublishJobs.mode,
+        instagramMediaId: t.instagramPublishJobs.instagramMediaId,
+        updatedAt: t.instagramPublishJobs.updatedAt,
+      })
+      .from(t.instagramPublishJobs)
+      .where(eq(t.instagramPublishJobs.postId, post.id))
+      .orderBy(desc(t.instagramPublishJobs.createdAt))
+      .get();
     return {
       id: post.id,
       title: post.title,
@@ -2144,6 +2164,7 @@ export function listPublishReady(db: Db): PublishReadyItem[] {
       metrics,
       mediaUploadCount,
       lastDryRunAt: lastDryRun?.ts ?? null,
+      instagramJob: instagramJob ?? null,
     };
   });
 }

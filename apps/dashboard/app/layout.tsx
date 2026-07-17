@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { loadBrandTokens } from "@adapters/config";
+import { cloudMutationBlockedReason, resolveRuntimeMode } from "@core/runtime";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -45,6 +46,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <a className="skip-link" href="#main">
           本文へスキップ
         </a>
+        {resolveRuntimeMode(process.env) === "cloud" ? (
+          <div
+            role="alert"
+            style={{ background: "#7a1515", color: "#fff", padding: "8px 16px", fontSize: 13, lineHeight: 1.6 }}
+          >
+            <strong>クラウド実行モード(V5.4)。</strong>
+            バックアップ/復元・書き出し・レンダリング・AI社員の実行はローカル専用機能のため、この環境では使用できません。
+            {cloudMutationBlockedReason(process.env) ? " 認証が未設定のため、すべての変更操作は拒否されます(fail closed)。" : null}
+            Instagram実投稿はPreview環境では構造的に無効です。
+          </div>
+        ) : null}
         {children}
       </body>
     </html>

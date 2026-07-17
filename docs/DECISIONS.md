@@ -104,6 +104,14 @@
 
 **V5実装記録(2026-07-15):** 代表者のV5実装指示により、公式APIアダプター・dry-run・公開直前再検査・冪等ジョブを先行実装した。外部条件が未確認のため既定は`disabled`。`live`有効化は上記条件と実アカウント接続確認を満たした後の代表者操作とし、AI社員やCLIには公開権限を与えない。
 
+## D-14 V5.4 クラウド対応基盤の方針(2026-07-17)
+
+- **DB**: SQLiteをローカル運用の正として維持。`DATABASE_PROVIDER`(既定sqlite)で境界を明示し、postgresは「準備のみ」(スキーマ`src/adapters/db/postgres/schema.sql`+export/import-checkツール)。接続未実装の間はfail closedで停止し「対応済み」と偽装しない
+- **移行先候補**: PostgreSQLはOSS(本体無料)。Neon Free / Supabase Free等を将来選択可能だが、**現時点で契約・作成しない**(月額追加0円維持。Q2の事前承認原則を継続)
+- **安全ゲート**: Vercel Preview/テスト環境ではInstagram live投稿を構造的に禁止(解除不可)。Vercel productionは `META_PUBLISH_MODE=live` + `ALLOW_LIVE_INSTAGRAM_PUBLISH=true` の二重条件。ローカル代表者環境はV5.3手順を維持
+- **認証**: 即席の簡易パスワード認証は作らない。cloud実行(`APP_RUNTIME_MODE=cloud`/VERCEL_ENV検出)で認証未確定の間は全変更系APIを拒否(fail closed)。PreviewはVercel Authenticationで保護するが、Production恒久認証とは区別する。方式確定までProduction公開禁止
+- 詳細: `26-v54-vercel-cloud-readiness.md`
+
 ## D-13 モデルルーティングと利用量制御
 
 - **採用**: `config/model-profiles.yaml` の3プロファイル(light/standard/heavy)+昇格ルール(QA事実矛盾・2回失敗・週次戦略のみ、日次3回上限)+`config/limits.yaml`(生成上限・リトライ2回・承認キューsoft_cap・API月次予算)。詳細は `14`

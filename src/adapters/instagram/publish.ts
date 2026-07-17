@@ -11,6 +11,7 @@ import * as t from "../db/schema";
 import { assertPostReadyForExternalPublish, audit, recordPublish } from "../db/store";
 import { workspaceRoot } from "../root";
 import { nowIso, ulid } from "../../core/ids";
+import { assertLiveInstagramAllowed } from "../../core/runtime";
 import {
   assertInstagramLiveConfig,
   loadInstagramConfig,
@@ -46,8 +47,16 @@ export interface InstagramPublishOutcome {
   plan: { kind: "image" | "carousel"; imageCount: number };
 }
 
-export function getInstagramReadiness(env: NodeJS.ProcessEnv = process.env): InstagramReadiness {
-  const safe = publicInstagramConfig(loadInstagramConfig(env), env);
+export interface InstagramLiveConfirmation {
+  confirmedPostId: string;
+  confirmedTitle: string;
+}
+
+export function getInstagramReadiness(
+  env: NodeJS.ProcessEnv = process.env,
+  options: { mediaStorageConfigured?: boolean } = {},
+): InstagramReadiness {
+  const safe = publicInstagramConfig(loadInstagramConfig(env), env, options);
   return {
     ...safe,
     recommendedLogin: "instagram_login",
@@ -151,13 +160,31 @@ export async function publishInstagramPost(
   db: Db,
   postId: string,
   actor: string,
-  deps: { env?: NodeJS.ProcessEnv; client?: { publish(plan: InstagramPublishPlan): Promise<MetaPublishResult> } } = {},
+  deps: {
+    env?: NodeJS.ProcessEnv;
+    client?: { publish(plan: InstagramPublishPlan): Promise<MetaPublishResult> };
+    confirmation?: InstagramLiveConfirmation;
+  } = {},
 ): Promise<InstagramPublishOutcome> {
   if (actor !== "owner") throw new Error("Instagram公開は代表者(owner)のみ実行できます");
   const config = loadInstagramConfig(deps.env);
-  if (config.mode === "disabled") throw new Error("Instagram公式APIは無効です(META_PUBLISH_MODE=disabled)");
+  if (config.mode === "disabled") {
+    // V5.4: Preview/テスト環境でliveが降格された場合は、その構造的理由をそのまま伝える。
+    throw new Error(config.liveBlockedReason ?? "Instagram公式APIは無効です(META_PUBLISH_MODE=disabled)");
+  }
   // live設定不備はジョブを作る前に拒否し、実行中に見える中途半端な行を残さない。
-  if (config.mode === "live") assertInstagramLiveConfig(config);
+  if (config.mode === "live") {
+    // V5.4 多重防御: loadInstagramConfigの降格に加え、実行環境ゲートを公開経路でも再検査する。
+    // envは一貫してdeps.env ?? process.envを使う(検証対象と実際の設定元を一致させる)。
+    const effectiveEnv = deps.env ?? process.env;
+    assertLiveInstagramAllowed(effectiveEnv);
+    // 公開URL自体は、この直後のbuildInstagramPostPlanで投稿単位に再検査する。
+    assertInstagramLiveConfig(config, { deferMediaCheckToPostPlan: true }, effectiveEnv);
+    const post = db.select().from(t.posts).where(eq(t.posts.id, postId)).get();
+    if (!post || deps.confirmation?.confirmedPostId !== postId || deps.confirmation.confirmedTitle !== post.title) {
+      throw new Error("実投稿の二段階確認が完了していません。対象投稿のタイトルを正確に入力してください");
+    }
+  }
   // 公開成功後の再クリックは、exported前提の再検査より先に完了ジョブを返す。
   // 手動公開済み等で完了ジョブがない場合はこの分岐に入らず、通常ゲートが拒否する。
   const completed = db.select().from(t.instagramPublishJobs)
@@ -173,6 +200,25 @@ export async function publishInstagramPost(
   const plan = buildInstagramPostPlan(db, postId, config);
   const mode = config.mode === "live" ? "live" : "dry_run";
   const idempotencyKey = `${mode}:${plan.idempotencyKey}`;
+
+  if (mode === "live") {
+    const latestDryRun = db.select({ detailJson: t.auditLog.detailJson })
+      .from(t.auditLog)
+      .where(and(eq(t.auditLog.subjectId, postId), eq(t.auditLog.action, "instagram_dry_run_report")))
+      .orderBy(desc(t.auditLog.ts))
+      .get();
+    let dryRunFingerprint: string | null = null;
+    try {
+      dryRunFingerprint = latestDryRun?.detailJson
+        ? (JSON.parse(latestDryRun.detailJson) as { planFingerprint?: string }).planFingerprint ?? null
+        : null;
+    } catch {
+      dryRunFingerprint = null;
+    }
+    if (dryRunFingerprint !== plan.idempotencyKey) {
+      throw new Error("現在の画像・文章と一致するdry-runがありません。実投稿前にdry-runをもう一度実行してください");
+    }
+  }
   const existing = db
     .select()
     .from(t.instagramPublishJobs)
@@ -360,6 +406,7 @@ export function runInstagramDryRun(
       designQaResult: report.qa.designQaResult,
       publishMode: report.publishMode,
       apiCalled: false,
+      planFingerprint: plan.idempotencyKey,
     });
   });
 

@@ -40,6 +40,17 @@ export default defineConfig({
       BLOOM_DB_PATH: process.env.BLOOM_DB_PATH,
       BLOOM_WORKSPACE_PATH: process.env.BLOOM_WORKSPACE_PATH,
       BLOOM_BACKUP_PATH: process.env.BLOOM_BACKUP_PATH,
+      // V5.4: E2Eは代表者の実.env(next.config.mjsが自動読込)へ依存させない。
+      // 事前に設定済みの値をloadEnvFileは上書きしないため、ここで明示固定して
+      // E2E環境からInstagram実投稿設定・実トークンを構造的に排除する。
+      META_PUBLISH_MODE: "disabled",
+      META_IG_USER_ID: "",
+      META_ACCESS_TOKEN: "",
+      META_MEDIA_BASE_URL: "",
+      BLOB_READ_WRITE_TOKEN: "",
+      DATABASE_PROVIDER: "sqlite",
+      APP_RUNTIME_MODE: "local",
+      ALLOW_LIVE_INSTAGRAM_PUBLISH: "false",
     },
   },
 });

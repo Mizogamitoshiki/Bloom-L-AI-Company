@@ -43,15 +43,22 @@
  *   pnpm company backup-list                  バックアップ一覧(整合性checksum付き)
  *   pnpm company restore --from YYYY-MM-DD     バックアップから復元(checksum検証→doctor→atomic置換)
  *   pnpm company doctor                       読み取り検査(旧形式spec・欠損ファイル等の検出。書き換えなし)
+ *   pnpm company db-export --actor owner [--output <dir>]   SQLite全テーブルをJSONL+manifestへ書き出し(読み取り専用・V5.4)
+ *   pnpm company db-export-verify --from <dir>              エクスポートのSHA-256/件数/FK/重複PK検証(V5.4)
+ *   pnpm company db-import-check --from <dir>               PostgreSQL投入前の事前検証(実接続なし・V5.4)
+ *   pnpm company db-import-postgres --from <dir> --actor owner [--execute]  取り込み(V5.4は常にdry-run止まり)
+ *   pnpm company cloud-readiness              Vercel移行準備の診断(秘密値なし・V5.4)
  *
  * 注意: 承認・却下・修正依頼、公開許可の記録・変更、生成停止の解除のコマンドは存在しない。
  * これらは代表者がNext.js UIから行う唯一の経路であり、
  * AI社員・オーケストレーターはこのCLIから実行できない(P1指摘1, V3-C/H)。
  */
 import { parseArgs } from "node:util";
+import { loadEnvFile } from "node:process";
 import { readFileSync } from "node:fs";
 import { asc, eq } from "drizzle-orm";
-import { openDb } from "../src/adapters/db/client";
+import { openDb, type OpenedDb } from "../src/adapters/db/client";
+import { resolveDatabaseProvider } from "../src/adapters/db/provider";
 import * as t from "../src/adapters/db/schema";
 import {
   ensureSeedOrg,
@@ -90,6 +97,9 @@ import {
 } from "../src/adapters/db/store";
 import { buildDailyReport, buildPeriodReport, doctorScan } from "../src/adapters/db/views";
 import { createBackup, listBackups, restoreBackup } from "../src/adapters/backup/backup";
+import { runDbExport, verifyDbExport } from "../src/adapters/db/migrate/export";
+import { checkImportSource, runPostgresImport } from "../src/adapters/db/migrate/import-check";
+import { buildCloudReadiness } from "../src/adapters/cloud/readiness";
 import { uploadPostMedia } from "../src/adapters/instagram/media-upload";
 import { runInstagramDryRun, getInstagramReadiness } from "../src/adapters/instagram/publish";
 import { VercelBlobStorage } from "../src/adapters/storage/vercel-blob";
@@ -105,6 +115,14 @@ import { todayLocal, ulid } from "../src/core/ids";
 import { renderPost } from "../src/adapters/render/render-post";
 import { OverflowError } from "../src/adapters/render/renderer";
 import { z } from "zod";
+
+// Next.jsと同じく、CLIもリポジトリ直下の.envを自動読込する。
+// 既存のシェル環境変数はNodeのloadEnvFile仕様により上書きしない。
+try {
+  loadEnvFile(path.resolve(process.cwd(), ".env"));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+}
 
 const HELP_HINT = "ヘルプ: scripts/company.ts の冒頭コメントを参照";
 
@@ -139,12 +157,28 @@ const { values: args } = parseArgs({
     version: { type: "string" },
     decision: { type: "string" },
     note: { type: "string" },
+    output: { type: "string" },
+    execute: { type: "boolean", default: false },
   },
   strict: true,
 });
 
-const opened = openDb();
-const { db, sqlite } = opened;
+/**
+ * V5.4レビュー修正: 診断・移行系コマンドは起動時にSQLiteを開かない(遅延初期化)。
+ * DATABASE_PROVIDER=postgres 設定時でも cloud-readiness / db-export系 / db-import系が
+ * 本来の診断・検証処理へ到達できる(openDbのprovider fail closedで先に停止しない)。
+ * それ以外の既存コマンドは従来どおり起動時に接続する(挙動不変)。
+ */
+const DB_LAZY_COMMANDS = new Set(["db-export", "db-export-verify", "db-import-check", "db-import-postgres", "cloud-readiness"]);
+let lazyOpened: OpenedDb | null = null;
+function getDb(): OpenedDb {
+  lazyOpened ??= openDb();
+  return lazyOpened;
+}
+const opened = DB_LAZY_COMMANDS.has(command ?? "") ? null : getDb();
+// 遅延コマンド(opened=null)のcase内では db/sqlite を参照しない。必要なら getDb() を使う。
+const db = (opened ? opened.db : null) as unknown as OpenedDb["db"];
+const sqlite = (opened ? opened.sqlite : null) as unknown as OpenedDb["sqlite"];
 const actor = args.actor ?? "system";
 
 const createPostInputSchema = z
@@ -396,8 +430,8 @@ try {
     }
     case "instagram-readiness": {
       // V5.2: 秘密値を含まない接続状態(誰でも参照可)。ストレージ設定状態も表示する。
-      const readiness = getInstagramReadiness();
       const storage = new VercelBlobStorage();
+      const readiness = getInstagramReadiness(process.env, { mediaStorageConfigured: storage.isConfigured() });
       out({ ok: true, ...readiness, storageProvider: storage.provider, storageConfigured: storage.isConfigured() });
       break;
     }
@@ -519,6 +553,71 @@ try {
     case "doctor": {
       const findings = doctorScan(db);
       out({ ok: findings.filter((f) => f.level === "error").length === 0, findings });
+      break;
+    }
+    case "db-export": {
+      // V5.4: SQLite→中間形式(JSONL+manifest)。読み取り専用接続のため実DBは変更されない。
+      // actor未指定(system)をownerへ昇格させない。--actor owner の明示が必要。
+      const r = runDbExport(actor, { outDir: args.output });
+      out({
+        ok: true,
+        outDir: r.outDir,
+        schemaVersion: r.manifest.schemaVersion,
+        totalRows: r.manifest.totalRows,
+        tables: r.manifest.tables.map((tb) => ({ name: tb.name, rows: tb.rows })),
+        message: `エクスポートしました(実DBは変更していません)。検証: pnpm company db-export-verify --from ${r.outDir}`,
+      });
+      break;
+    }
+    case "db-export-verify": {
+      if (!args.from) fail("--from <エクスポートディレクトリ> が必要です");
+      const report = verifyDbExport(args.from);
+      out(report);
+      if (!report.ok) process.exitCode = 1;
+      break;
+    }
+    case "db-import-check": {
+      if (!args.from) fail("--from <エクスポートディレクトリ> が必要です");
+      const report = checkImportSource(args.from);
+      out(report);
+      if (!report.ok) process.exitCode = 1;
+      break;
+    }
+    case "db-import-postgres": {
+      // V5.4: 既定はdry-run。--execute でも provider/URL未設定なら拒否し、実接続実装が無い間は必ず停止する。
+      if (!args.from) fail("--from <エクスポートディレクトリ> が必要です");
+      const r = runPostgresImport(args.from, actor, { execute: args.execute });
+      out(r);
+      if (!r.ok) process.exitCode = 1;
+      break;
+    }
+    case "cloud-readiness": {
+      // V5.4: 秘密値を一切含まない移行準備診断(読み取り専用)。
+      // provider=sqliteのときだけ遅延接続して読み取り確認する。postgres(未実装)や
+      // provider設定不備でもここで落ちず、buildCloudReadinessがblockerとして報告する。
+      let sqliteQueryOk = false;
+      try {
+        if (resolveDatabaseProvider(process.env).provider === "sqlite") {
+          getDb().db.select().from(t.settings).limit(1).all();
+          sqliteQueryOk = true;
+        }
+      } catch {
+        sqliteQueryOk = false;
+      }
+      let backupCount = 0;
+      try {
+        backupCount = listBackups().length;
+      } catch {
+        backupCount = 0;
+      }
+      const storage = new VercelBlobStorage();
+      const report = buildCloudReadiness(process.env, {
+        sqliteQueryOk,
+        blobConfigured: storage.isConfigured(),
+        backupCount,
+      });
+      out(report);
+      if (!report.ok) process.exitCode = 1;
       break;
     }
     default:

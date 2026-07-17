@@ -410,6 +410,41 @@ export function doctorScan(db: Db): DoctorFinding[] {
     findings.push({ level: "warn", subject: `meeting ${m.id}`, message: "議事録成果物への参照が壊れています", fix: "pnpm company meeting-save で再保存してください" });
   }
 
+  // V5.4: 公開画像URL記録の安全性(読み取りのみ)。HTTPS以外・localhost・トークン様クエリを検出する
+  const mediaUploads = db.select().from(t.postMediaUploads).all();
+  for (const upload of mediaUploads) {
+    let bad: string | null = null;
+    try {
+      const u = new URL(upload.publicUrl);
+      if (u.protocol !== "https:") bad = "HTTPSではありません";
+      else if (["localhost", "127.0.0.1", "::1"].includes(u.hostname) || u.hostname.endsWith(".local")) bad = "非公開ホストです";
+      else if (/(access_token|token|secret|authorization|signature|sig|key)=/i.test(u.search)) bad = "トークン様のクエリを含みます";
+    } catch {
+      bad = "URLとして不正です";
+    }
+    if (bad) {
+      findings.push({
+        level: "error",
+        subject: `media upload ${upload.id}`,
+        message: `公開画像URLが安全ではありません(${bad})`,
+        fix: "pnpm company media-upload --post <id> --actor owner で正しい公開URLへ再準備してください",
+      });
+    }
+  }
+
+  // V5.4: schema_migrationsの適用連続性(欠番はDB状態の混在を示す)
+  const appliedMigrationIds = (db.all(sql`select id from schema_migrations order by id`) as { id: number }[]).map((r) => r.id);
+  for (let i = 1; i < appliedMigrationIds.length; i++) {
+    if (appliedMigrationIds[i]! !== appliedMigrationIds[i - 1]! + 1) {
+      findings.push({
+        level: "warn",
+        subject: "database",
+        message: `schema_migrationsに欠番があります(${appliedMigrationIds[i - 1]} → ${appliedMigrationIds[i]})`,
+        fix: "DBの由来を確認してください(バックアップからの復元や手動編集の痕跡の可能性)",
+      });
+    }
+  }
+
   // V4: バックアップの有無・整合(read-only)
   try {
     const backups = listBackups();

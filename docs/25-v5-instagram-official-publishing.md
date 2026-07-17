@@ -107,3 +107,53 @@ pnpm company instagram-dry-run --post <postId> --actor owner
 3. Metaデベロッパー設定(アプリ・Instagram Login・権限)を代表者自身が確認した
 4. 初回は捨て投稿でのテストを行い、即削除できることを確認した
 5. `META_PUBLISH_MODE=live` への変更は代表者が.envを手動編集する(AI・自動処理は変更しない)
+
+---
+
+## V5.3: 代表者確認付き実投稿(2026-07-17)
+
+### 実投稿の安全条件
+
+実投稿は次の条件をすべて満たした場合に限り、`/publish`の代表者操作から実行できる。AI社員・kickoff・CLIにはlive公開コマンドを設けない。
+
+1. 投稿が代表者承認済みで、export bundle・画像SHA-256・caption・権利・内容QA・紫苑visual QA・承認済みテンプレート版が再検査に合格
+2. Vercel Blobへ公開画像が全枚数アップロード済みで、順序・件数・HTTPS URLが一致
+3. 現在の画像URLとcaptionから算出したfingerprintが、直前のdry-run監査記録と完全一致
+4. `META_IG_USER_ID`・`META_ACCESS_TOKEN`が設定済みで、代表者が`.env`を手動で`META_PUBLISH_MODE=live`へ変更
+5. 画面の最終警告を確認し、さらに表示された投稿タイトルを一字一句同じに入力
+
+画像やcaptionをdry-run後に変更した場合、fingerprintが変わるため実投稿は停止する。公開画像の準備とdry-runをやり直す。
+
+### 初回実投稿の手順
+
+1. `.env`はまだ`META_PUBLISH_MODE=disabled`のまま、対象投稿で「公開画像を準備」→「dry-runを実行」まで完了する
+2. 画像順・全画像・caption・CTA・投稿先アカウントを代表者が目視確認する
+3. `.env`を手動で`META_PUBLISH_MODE=live`へ変更し、開発サーバーを1つだけ再起動する
+4. `pnpm company instagram-readiness`で`liveReady: true`と`externalSendEnabled: true`を確認する
+5. `/publish`で対象投稿の「Instagramへ公式APIで公開」を押し、確認ダイアログとタイトル入力を完了する
+6. 成功表示とInstagramアプリの投稿を照合する。確認後に実績計測へ進む
+7. 作業後に実投稿を止めたい場合は`.env`を`META_PUBLISH_MODE=disabled`へ戻してサーバーを再起動する
+
+`BLOB_READ_WRITE_TOKEN`を使う場合、`META_MEDIA_BASE_URL`は不要。投稿単位でDBに記録されたVercel Blobの公開HTTPS URLを使用する。
+
+ダッシュボードとcompany CLIは、どちらもリポジトリ直下の同じ`.env`を読む。以前`source .env`したターミナルに古い値が残っている場合は、`unset META_PUBLISH_MODE`してからサーバーを再起動する。
+
+### 二重投稿防止と障害時対応
+
+- 外部通信開始前に`publishing`を記録し、成功後にInstagramメディアIDを保存する。同じ投稿内容の再操作は保存済みジョブを返し、Metaへ再送しない
+- Meta側の成功・失敗を断定できないタイムアウト等は`needs_reconciliation`で停止する。画面にジョブIDを表示し、公開ボタンを無効化する
+- `needs_reconciliation`時は再試行せず、Instagramアプリで投稿の有無を確認してジョブIDを保全する。DBを直接編集しない
+- App Review・Webhook・DM・コメント管理・予約投稿はV5.3の対象外
+
+---
+
+## V5.4追補: 実行環境ゲート(2026-07-17)
+
+`META_PUBLISH_MODE=live` は実行環境によって次のとおり制限される(core層 `src/core/runtime.ts`。UI/CLI/APIから回避不能):
+
+- テスト環境(NODE_ENV=test)・Vercel Preview/developmentでは、liveは常に`disabled`へ降格される(ALLOW_LIVE_INSTAGRAM_PUBLISHでも解除不可)
+- Vercel productionでは `ALLOW_LIVE_INSTAGRAM_PUBLISH=true` との二重条件を満たした場合のみliveが有効
+- ローカル代表者環境(VERCEL_ENVなし)は本書V5.3の手順のまま変わらない
+- E2Eテストは実`.env`から隔離され、常に`disabled`+空トークンで動作する
+
+実投稿作業が終わったら `.env` を `META_PUBLISH_MODE=disabled` へ戻すこと(`pnpm company cloud-readiness` が戻し忘れを警告する)。

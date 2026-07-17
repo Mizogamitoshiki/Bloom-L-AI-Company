@@ -8,7 +8,11 @@ import { toFriendlyMessage } from "@/lib/errors";
 
 export const dynamic = "force-dynamic";
 
-const bodySchema = z.object({ confirmation: z.string().optional() }).strict();
+const bodySchema = z.object({
+  confirmation: z.string().optional(),
+  confirmedPostId: z.string().optional(),
+  confirmedTitle: z.string().optional(),
+}).strict();
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { id } = await ctx.params;
@@ -20,7 +24,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     }
     const { db, sqlite } = openDb();
     try {
-      const result = await publishInstagramPost(db, id, "owner");
+      const result = await publishInstagramPost(db, id, "owner", {
+        confirmation: body.confirmation === "PUBLISH_TO_INSTAGRAM"
+          ? { confirmedPostId: body.confirmedPostId ?? "", confirmedTitle: body.confirmedTitle ?? "" }
+          : undefined,
+      });
       return NextResponse.json({ ok: true, ...result });
     } finally {
       sqlite.close();

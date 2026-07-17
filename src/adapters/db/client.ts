@@ -12,6 +12,7 @@ import path from "node:path";
 import * as schema from "./schema";
 import { findRepoRoot } from "../root";
 import { runMigrations } from "./migrations";
+import { assertDatabaseProviderUsable } from "./provider";
 
 export type Db = BetterSQLite3Database<typeof schema>;
 
@@ -119,6 +120,8 @@ export interface OpenedDb {
 }
 
 export function openDb(dbPath: string = process.env.BLOOM_DB_PATH ?? defaultDbPath()): OpenedDb {
+  // V5.4: DATABASE_PROVIDER境界。sqlite以外(postgres等)はfail closedで停止する(provider.ts参照)。
+  assertDatabaseProviderUsable(process.env);
   mkdirSync(path.dirname(dbPath), { recursive: true });
   const sqlite = new Database(dbPath);
   try {

@@ -97,17 +97,31 @@ export default function PublishPage(): JSX.Element {
     }
   }
 
-  async function instagramAct(postId: string): Promise<void> {
+  async function instagramAct(postId: string, postTitle: string): Promise<void> {
     if (!instagram || instagram.mode === "disabled") return;
     const isLive = instagram.mode === "live";
     if (isLive && !window.confirm("この投稿をBloom-L公式Instagramへ今すぐ公開します。公開後は取り消せません。画像・文章・アカウントを最終確認しましたか？")) return;
+    let confirmedTitle: string | undefined;
+    if (isLive) {
+      const typed = window.prompt(`誤投稿防止のため、次の投稿タイトルを正確に入力してください。\n\n${postTitle}`);
+      if (typed === null) return;
+      if (typed !== postTitle) {
+        setError("投稿タイトルが一致しないため、実投稿を中止しました");
+        return;
+      }
+      confirmedTitle = typed;
+    }
     setBusy(postId);
     setError(null);
     try {
       const res = await fetch(`/api/posts/${postId}/instagram-publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
-        body: JSON.stringify({ confirmation: isLive ? "PUBLISH_TO_INSTAGRAM" : undefined }),
+        body: JSON.stringify({
+          confirmation: isLive ? "PUBLISH_TO_INSTAGRAM" : undefined,
+          confirmedPostId: isLive ? postId : undefined,
+          confirmedTitle,
+        }),
       });
       const json: unknown = await res.json();
       if (!res.ok) throw new Error((json as { error?: string }).error ?? "Instagram公開処理に失敗しました");
@@ -302,6 +316,13 @@ export default function PublishPage(): JSX.Element {
                     {" ・ "}dry-run: <strong>{it.lastDryRunAt ? `実行済み(${new Date(it.lastDryRunAt).toLocaleString("ja-JP")})` : "未実行"}</strong>
                     {" — Instagramにはまだ投稿されていません"}
                   </p>
+                  {it.instagramJob && ["publishing", "needs_reconciliation"].includes(it.instagramJob.status) ? (
+                    <div className="error-box" role="alert">
+                      <strong>実投稿結果の確認が必要です。</strong>{" "}
+                      Instagramアプリで同じ投稿が公開されていないか確認してください。二重投稿防止のため、この投稿は自動再送されません。
+                      <br />ジョブID: <code>{it.instagramJob.id}</code>
+                    </div>
+                  ) : null}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button
                       type="button"
@@ -324,8 +345,12 @@ export default function PublishPage(): JSX.Element {
                       <button
                         type="button"
                         className={instagram.mode === "live" ? "btn btn--success" : "btn btn--secondary"}
-                        disabled={busy === it.id || (instagram.mode === "live" && !instagram.liveReady)}
-                        onClick={() => void instagramAct(it.id)}
+                        disabled={
+                          busy === it.id
+                          || (instagram.mode === "live" && !instagram.liveReady)
+                          || !!(it.instagramJob && ["publishing", "needs_reconciliation"].includes(it.instagramJob.status))
+                        }
+                        onClick={() => void instagramAct(it.id, it.title)}
                       >
                         {busy === it.id ? "処理中…" : instagram.mode === "live" ? "Instagramへ公式APIで公開" : "公式APIドライランを実行"}
                       </button>
@@ -358,6 +383,11 @@ export default function PublishPage(): JSX.Element {
                   <p style={{ fontSize: 13, margin: "0 0 6px" }}>
                     投稿済み{it.publishedAt ? `(${new Date(it.publishedAt).toLocaleString("ja-JP")})` : ""}。3日後・7日後にInstagramインサイトから実績値を入力してください。
                   </p>
+                  {it.instagramJob?.status === "published" && it.instagramJob.instagramMediaId ? (
+                    <p style={{ fontSize: 12.5, margin: "0 0 8px", color: "var(--color-text-muted)" }}>
+                      Instagram公式API公開記録: メディアID <code>{it.instagramJob.instagramMediaId}</code>
+                    </p>
+                  ) : null}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {[3, 7].map((w) => {
                       const m = it.metrics.find((x) => x.windowDays === w);
