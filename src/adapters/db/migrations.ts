@@ -416,6 +416,117 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // V6: 投稿後分析・改善ループ。analysis_snapshots(事実のスナップショット・append-only)、
+    // improvement_proposals(AIの提案)、improvement_decisions(CEO判断・append-only)、
+    // post_improvement_directives(どの投稿にどの承認済み提案を適用したか)、
+    // business_outcomes(owner手動の匿名事業成果)。
+    // 追加のみ(既存データ・post_metrics・reports・meetingsは不変)。1トランザクション・再実行可能・FK整合。
+    id: 11,
+    name: "v6-analytics-improvement-loop",
+    up(sqlite) {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS analysis_snapshots (
+          id TEXT PRIMARY KEY,
+          window_days INTEGER NOT NULL,
+          period_start TEXT,
+          period_end TEXT,
+          generated_at TEXT NOT NULL,
+          source_data_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS analysis_snapshots_window_hash_uq ON analysis_snapshots(window_days, source_data_hash);
+        CREATE INDEX IF NOT EXISTS analysis_snapshots_window_idx ON analysis_snapshots(window_days, created_at);
+
+        CREATE TABLE IF NOT EXISTS improvement_proposals (
+          id TEXT PRIMARY KEY,
+          analysis_snapshot_id TEXT NOT NULL REFERENCES analysis_snapshots(id),
+          author_employee_id TEXT NOT NULL REFERENCES employees(id),
+          title TEXT NOT NULL,
+          observation TEXT NOT NULL,
+          hypothesis TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          test_variable TEXT NOT NULL,
+          expected_signal TEXT NOT NULL,
+          proposed_action TEXT NOT NULL,
+          risk TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS improvement_proposals_snapshot_idx ON improvement_proposals(analysis_snapshot_id);
+
+        CREATE TABLE IF NOT EXISTS improvement_decisions (
+          id TEXT PRIMARY KEY,
+          proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
+          decision TEXT NOT NULL,
+          reason TEXT,
+          decided_by TEXT NOT NULL,
+          decided_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS improvement_decisions_proposal_idx ON improvement_decisions(proposal_id, decided_at);
+
+        CREATE TABLE IF NOT EXISTS post_improvement_directives (
+          id TEXT PRIMARY KEY,
+          post_id TEXT NOT NULL REFERENCES posts(id),
+          proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
+          reason TEXT,
+          applied_by TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS post_improvement_directives_uq ON post_improvement_directives(post_id, proposal_id);
+
+        CREATE TABLE IF NOT EXISTS business_outcomes (
+          id TEXT PRIMARY KEY,
+          occurred_on TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          source TEXT NOT NULL,
+          related_post_id TEXT REFERENCES posts(id),
+          amount_yen INTEGER,
+          anonymized_note TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS business_outcomes_occurred_idx ON business_outcomes(occurred_on, kind);
+      `);
+    },
+  },
+  {
+    // V6再レビュー(P1-2/P2-1): 改善提案へ構造化ファクト参照と構造化された変更内容を追加。
+    // 追加のみ(#11は適用済みのため書き換えない)。既存行(実DBは0件)はNULLのまま安全。
+    id: 12,
+    name: "v6-structured-proposals",
+    up(sqlite) {
+      addColumnIfMissing(sqlite, "improvement_proposals", "structured_fact_refs_json", "structured_fact_refs_json TEXT");
+      addColumnIfMissing(sqlite, "improvement_proposals", "test_change_json", "test_change_json TEXT");
+    },
+  },
+  {
+    // V6最終レビュー(P1): CEO判断の「最新」をdecided_atやrowidの暗黙順序に依存させない。
+    // 既存履歴はproposalごとに decided_at → rowid(当時の挿入順)で一度だけ連番化し、
+    // 以後はアプリケーションが同一トランザクション内で次番号を採番する。
+    id: 13,
+    name: "v6-decision-sequence",
+    up(sqlite) {
+      addColumnIfMissing(sqlite, "improvement_decisions", "decision_sequence", "decision_sequence INTEGER");
+      sqlite.exec(`
+        UPDATE improvement_decisions AS current
+        SET decision_sequence = (
+          SELECT COUNT(*)
+          FROM improvement_decisions AS prior
+          WHERE prior.proposal_id = current.proposal_id
+            AND (
+              prior.decided_at < current.decided_at
+              OR (prior.decided_at = current.decided_at AND prior.rowid <= current.rowid)
+            )
+        )
+        WHERE decision_sequence IS NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS improvement_decisions_proposal_sequence_uq
+          ON improvement_decisions(proposal_id, decision_sequence);
+      `);
+    },
+  },
 ];
 
 /**

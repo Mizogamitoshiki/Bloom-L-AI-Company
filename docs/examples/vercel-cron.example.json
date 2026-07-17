@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "V6-I: Vercel Cron設定の例(無効なexampleファイル。デプロイでは読み込まれない)。",
+    "有効化するにはリポジトリ直下の vercel.json へ crons を記載する必要があるが、",
+    "PostgreSQL実接続・Production owner認証・本番デプロイが完了し、代表者が明示指示するまで行わない。",
+    "Vercel CronはUTC実行。JST 07:00 に動かす場合は前日 22:00 UTC を指定する(下記例)。",
+    "CRON_SECRETはVercelのSensitive環境変数として設定する(コミットしない)。"
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/analytics",
+      "schedule": "0 22 * * *"
+    }
+  ]
+}

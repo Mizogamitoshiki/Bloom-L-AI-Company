@@ -159,3 +159,17 @@ pnpm company doctor   # 読み取りのみ。DBは書き換えない
 - 移行エクスポートは `data/` 配下(gitignore対象)。**Gitへ追加しない**
 - Vercel Preview環境ではInstagram実投稿が構造的に禁止される(設定ミスでも投稿されない)
 - 詳細・Vercel設定・rollback手順: [26-v54-vercel-cloud-readiness.md](26-v54-vercel-cloud-readiness.md)
+
+---
+
+## 10. V6 成長分析と改善ループ
+
+- **成長分析画面**: http://localhost:3000/analytics(3日/7日切替・未取得と0は別表示・sampleCount常時表示)
+- 実績入力は従来どおり /publish から(公開3日後・7日後)。未入力は/analyticsの「入力待ち」に出る
+- 改善提案の承認・却下・修正依頼は/analyticsから代表者のみ(却下・修正は理由必須)。承認済みだけが次回/kickoffへ最大3件渡る
+- 事業成果の記録(owner専用・匿名。顧客特定情報は自動拒否される):
+  ```bash
+  pnpm company business-outcome-add --json '{"occurredOn":"2026-07-17","kind":"inquiry","source":"instagram"}' --actor owner
+  ```
+- 分析スナップショットの手動生成/確認: `pnpm company analytics-snapshot` / `pnpm company analytics-show`
+- Cronはまだ本番稼働しない(`pnpm company analytics-cron-dry-run` で処理本体だけ検証可能)。詳細: [27-v6-growth-loop.md](27-v6-growth-loop.md)

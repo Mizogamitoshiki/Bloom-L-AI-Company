@@ -48,6 +48,15 @@
  *   pnpm company db-import-check --from <dir>               PostgreSQL投入前の事前検証(実接続なし・V5.4)
  *   pnpm company db-import-postgres --from <dir> --actor owner [--execute]  取り込み(V5.4は常にdry-run止まり)
  *   pnpm company cloud-readiness              Vercel移行準備の診断(秘密値なし・V5.4)
+ *   pnpm company analytics-snapshot [--window 3|7]           分析スナップショット生成(通常コード集計・冪等・V6)
+ *   pnpm company analytics-show [--window 3|7]               最新スナップショットの表示(V6)
+ *   pnpm company improvement-proposal-save --file <json> --actor <aoi等>  改善提案の保存(機械QA付き・V6)
+ *   pnpm company improvement-list                            改善提案と判断状態の一覧(V6)
+ *   pnpm company improvement-decide --proposal <id> --decision <approved|rejected|revision_requested|superseded> [--reason <理由>] --actor owner
+ *   pnpm company improvement-directives                      次回kickoffへ渡せる承認済み改善指示(最大3件・V6)
+ *   pnpm company improvement-apply --post <id> --proposal <id> [--reason <採用理由>] --actor aoi  適用記録(二重適用防止・V6)
+ *   pnpm company business-outcome-add --json '<outcome>' --actor owner   匿名の事業成果を記録(V6)
+ *   pnpm company analytics-cron-dry-run                      Cron処理本体のdry-run(書き込みなし・V6)
  *
  * 注意: 承認・却下・修正依頼、公開許可の記録・変更、生成停止の解除のコマンドは存在しない。
  * これらは代表者がNext.js UIから行う唯一の経路であり、
@@ -100,6 +109,18 @@ import { createBackup, listBackups, restoreBackup } from "../src/adapters/backup
 import { runDbExport, verifyDbExport } from "../src/adapters/db/migrate/export";
 import { checkImportSource, runPostgresImport } from "../src/adapters/db/migrate/import-check";
 import { buildCloudReadiness } from "../src/adapters/cloud/readiness";
+import { createAnalysisSnapshot, createAllWindowSnapshots, latestAnalysisSnapshot } from "../src/adapters/db/analytics";
+import {
+  addBusinessOutcome,
+  applyImprovementDirective,
+  decideImprovementProposal,
+  listApprovedDirectives,
+  listImprovementProposals,
+  saveImprovementProposal,
+} from "../src/adapters/db/improvements";
+import { runScheduledAnalytics } from "../src/adapters/cloud/cron";
+import { ANALYSIS_WINDOWS, type AnalysisWindow } from "../src/core/analytics";
+import { IMPROVEMENT_DECISIONS, type ImprovementDecision as V6Decision } from "../src/core/schemas";
 import { uploadPostMedia } from "../src/adapters/instagram/media-upload";
 import { runInstagramDryRun, getInstagramReadiness } from "../src/adapters/instagram/publish";
 import { VercelBlobStorage } from "../src/adapters/storage/vercel-blob";
@@ -159,6 +180,9 @@ const { values: args } = parseArgs({
     note: { type: "string" },
     output: { type: "string" },
     execute: { type: "boolean", default: false },
+    window: { type: "string" },
+    proposal: { type: "string" },
+    reason: { type: "string" },
   },
   strict: true,
 });
@@ -589,6 +613,102 @@ try {
       const r = runPostgresImport(args.from, actor, { execute: args.execute });
       out(r);
       if (!r.ok) process.exitCode = 1;
+      break;
+    }
+    case "analytics-snapshot": {
+      // V6-B: 通常コード集計の分析スナップショット(冪等。同じ入力なら既存を返す)。AI不使用。
+      if (args.window && !["3", "7"].includes(args.window)) fail("--window は 3 または 7 を指定してください");
+      const results = args.window
+        ? [createAnalysisSnapshot(db, Number(args.window) as AnalysisWindow, actor)]
+        : createAllWindowSnapshots(db, actor);
+      out({
+        ok: true,
+        snapshots: results.map((r) => ({
+          windowDays: r.windowDays,
+          snapshotId: r.snapshotId,
+          created: r.created,
+          sourceDataHash: r.sourceDataHash,
+          publishedCount: r.facts.dataCoverage.publishedCount,
+          measuredCount: r.facts.dataCoverage.measuredCount,
+          warnings: r.facts.warnings,
+        })),
+      });
+      break;
+    }
+    case "analytics-show": {
+      const windows: AnalysisWindow[] = args.window ? [Number(args.window) as AnalysisWindow] : [...ANALYSIS_WINDOWS];
+      if (windows.some((w) => !ANALYSIS_WINDOWS.includes(w))) fail("--window は 3 または 7 を指定してください");
+      const shown = windows.map((w) => {
+        const snap = latestAnalysisSnapshot(db, w);
+        return snap
+          ? { windowDays: w, snapshotId: snap.id, generatedAt: snap.generatedAt, sourceDataHash: snap.sourceDataHash, facts: snap.facts }
+          : { windowDays: w, snapshotId: null, message: "スナップショットがありません(pnpm company analytics-snapshot を実行)" };
+      });
+      out({ ok: true, snapshots: shown });
+      break;
+    }
+    case "improvement-proposal-save": {
+      // V6-C: AI社員の改善提案の保存。evidence実在・断定表現は通常コードが検査して拒否する。
+      if (!args.file) fail("--file <proposal.json> が必要です");
+      const raw: unknown = JSON.parse(readFileSync(args.file, "utf8"));
+      const r = saveImprovementProposal(db, raw, actor);
+      out({ ok: true, proposalId: r.proposalId, message: "改善提案を保存しました(CEO判断待ち。承認前はkickoffへ渡りません)" });
+      break;
+    }
+    case "improvement-list": {
+      out({ ok: true, proposals: listImprovementProposals(db) });
+      break;
+    }
+    case "improvement-decide": {
+      // V6-C: CEO判断(owner専用)。actor未指定(system)をownerへ自動昇格させない。
+      if (!args.proposal) fail("--proposal <id> が必要です");
+      if (!args.decision) fail(`--decision <${IMPROVEMENT_DECISIONS.join("|")}> が必要です`);
+      const r = decideImprovementProposal(
+        db,
+        { proposalId: args.proposal, decision: args.decision as V6Decision, reason: args.reason },
+        actor,
+      );
+      out({ ok: true, ...r });
+      break;
+    }
+    case "improvement-directives": {
+      // V6-E: 次回kickoffへ渡せる承認済み・期限内の改善指示(最大3件)
+      const directives = listApprovedDirectives(db);
+      out({
+        ok: true,
+        count: directives.length,
+        maxPerKickoff: 3,
+        directives: directives.map((d) => ({
+          proposalId: d.id,
+          title: d.title,
+          testVariable: d.testVariable,
+          testChange: d.testChange,
+          proposedAction: d.proposedAction,
+          expectedSignal: d.expectedSignal,
+          expiresAt: d.expiresAt,
+          evidenceRefs: d.evidenceRefs,
+        })),
+      });
+      break;
+    }
+    case "improvement-apply": {
+      // V6-E: 改善指示の投稿への適用記録。(post, proposal)一意でkickoff再実行の二重適用を防ぐ。
+      if (!args.post || !args.proposal) fail("--post <id> --proposal <id> が必要です");
+      const r = applyImprovementDirective(db, { postId: args.post, proposalId: args.proposal, reason: args.reason }, actor);
+      out({ ok: true, ...r, message: r.created ? "適用を記録しました" : "既に適用済みのため記録を再利用しました(二重適用なし)" });
+      break;
+    }
+    case "business-outcome-add": {
+      // V6-G: 匿名の事業成果(owner専用)。個人情報らしい入力は通常コードが拒否する。
+      if (!args.json) fail('--json \'{"occurredOn":"YYYY-MM-DD","kind":"inquiry|estimate|order","source":"instagram|referral|website|unknown",...}\' が必要です');
+      const r = addBusinessOutcome(db, JSON.parse(args.json), actor);
+      out({ ok: true, outcomeId: r.outcomeId, message: "事業成果を記録しました(匿名・顧客特定情報なし)" });
+      break;
+    }
+    case "analytics-cron-dry-run": {
+      // V6-I: Cron処理本体のdry-run。DBへ書き込まない。Meta・AIも呼ばない。
+      const result = runScheduledAnalytics(db, { dryRun: true });
+      out({ ok: true, ...result, note: "dry-runのためDBへは書き込んでいません。実Cronはproduction+PostgreSQL実装完了までnot_readyです" });
       break;
     }
     case "cloud-readiness": {

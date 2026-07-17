@@ -161,7 +161,7 @@ test.describe.serial("V4-F コア検収シナリオ", () => {
   });
 });
 
-const RESPONSIVE_PAGES = ["/", "/approvals", "/publish", "/pipeline", "/calendar", "/portfolio", "/reports", "/meetings", "/settings", "/templates"];
+const RESPONSIVE_PAGES = ["/", "/approvals", "/publish", "/pipeline", "/calendar", "/portfolio", "/reports", "/analytics", "/meetings", "/settings", "/templates"];
 for (const width of [375, 768, 1440]) {
   test(`幅${width}pxで主要9画面に重大な横スクロールがない`, async ({ page }) => {
     test.setTimeout(90_000);

@@ -13,6 +13,7 @@ const PAGES: { path: string; name: string }[] = [
   { path: "/calendar", name: "カレンダー" },
   { path: "/portfolio", name: "実績素材" },
   { path: "/reports", name: "レポート" },
+  { path: "/analytics", name: "成長分析" },
   { path: "/meetings", name: "会議" },
   { path: "/settings", name: "設定" },
 ];

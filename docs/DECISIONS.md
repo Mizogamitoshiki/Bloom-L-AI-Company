@@ -112,6 +112,14 @@
 - **認証**: 即席の簡易パスワード認証は作らない。cloud実行(`APP_RUNTIME_MODE=cloud`/VERCEL_ENV検出)で認証未確定の間は全変更系APIを拒否(fail closed)。PreviewはVercel Authenticationで保護するが、Production恒久認証とは区別する。方式確定までProduction公開禁止
 - 詳細: `26-v54-vercel-cloud-readiness.md`
 
+## D-15 V6 改善ループの方針(2026-07-17)
+
+- **役割分担**: 数値・率・中央値・欠損判定=通常コード(analysis snapshot) / AI社員=事実の言い換えと仮説の提案 / CEO=唯一の判断者。AIがapprovedを書ける経路を作らない(core層 `decideImprovementProposal` がowner専用)
+- **表現統制**: 計測10本未満は断定禁止(「傾向の可能性」のみ)、件数によらず因果断定禁止。通常コードが保存時に拒否する
+- **kickoff接続**: 承認済み・期限内の改善指示だけ・最大3件・(post,proposal)一意の二重適用防止。改善指示はブランドルール・公開ガードより優先しない
+- **Insights/Cron**: Instagram Insightsは公式permission確認まで境界のみ(通信ゼロ)。Cronは認証+環境ゲート+not_readyのfail closed三段構えで、PostgreSQL・Production認証・デプロイ完了まで本番稼働しない
+- **将来組織**: 美月(CEO秘書)・楓(AI-PMO)は準備中の記録のみ。改善ループの実稼働範囲はInstagram運用課。詳細: `27-v6-growth-loop.md` §10
+
 ## D-13 モデルルーティングと利用量制御
 
 - **採用**: `config/model-profiles.yaml` の3プロファイル(light/standard/heavy)+昇格ルール(QA事実矛盾・2回失敗・週次戦略のみ、日次3回上限)+`config/limits.yaml`(生成上限・リトライ2回・承認キューsoft_cap・API月次予算)。詳細は `14`

@@ -109,6 +109,19 @@ V5.4(DB境界・PostgreSQL移行準備・export/import-check・Vercel安全ゲ�
 32. importは全体1トランザクション・二重import拒否の設計を維持し、実接続の無い状態で「成功」と報告するテスト・コードを書かない
 33. E2Eの webServer は実`.env` へ依存させない(playwright.config.tsで `META_PUBLISH_MODE=disabled`・空トークンを明示固定)
 
+## V6追補(2026-07-17 実装済み — 投稿後分析・CEO承認型改善ループ・Cron準備)
+
+V6(analysis snapshot・改善提案/CEO判断・kickoff接続・/analytics・事業成果・Insights境界・Cron-ready)を実装。詳細は `27-v6-growth-loop.md`。追加の不変条件:
+
+34. 数値計算・率計算・中央値・欠損判定は `src/core/analytics.ts`(通常コード)のみ。AIはanalysis snapshotの値を読み言い換えるだけで、再計算・補完・丸め直しをしない。未取得(null)を0にしない
+35. 計測済み投稿10本未満での断定表現、および件数によらない因果断定は、`findForbiddenAssertions`(通常コード)が改善提案の保存時に拒否する。evidenceRefsはsnapshotの計測済み投稿と機械照合する。V6再レビュー: 提案の数値は`structuredFactRefs`による構造化参照のみ(実在+完全一致を検査、observationは通常コード生成)。snapshotの冪等hashは入力+JST業務日。提案保存はsystem/owner不可(提案者本人かaoiのみ)。testVariableは6種enumの1つだけ。/api/analyticsは認証未確定のcloud環境で読み取りも403(詳細: 27-v6-growth-loop.md §14)
+36. 改善提案(improvement_proposals)と判断(improvement_decisions)は分離。判断はappend-onlyで、**ownerだけが** `decideImprovementProposal` を通じて記録できる(AI・system・CLI自動昇格の経路なし)
+37. kickoffへ渡る改善指示は「最新判断=approved かつ 期限内」だけ・最大3件。適用は `(post_id, proposal_id)` 一意で二重適用を構造的に防ぐ。承認前の提案を企画へ渡さない
+38. business_outcomesはowner専用・匿名。顧客を特定しうる文字列(メール・電話・LINE ID・URL・@)は通常コードが検出して保存を拒否する。DM原文・氏名・連絡先を分析データへ保存しない
+39. Instagram Insights取得は境界(MetricsSourcePort)のみ。公式permission・アプリレビュー要否を確認できるまで実装しない(どのモードでもMetaへ通信しない)。`INSTAGRAM_INSIGHTS_MODE` 既定disabled
+40. /api/cron/analytics はBearer CRON_SECRET必須(未設定・不一致401)・production以外403・DB未準備503。CronからClaude Code・AIエージェント・Meta投稿処理を呼ばない。Vercel Cron設定は無効なexample(docs/examples/)のみで、vercel.jsonへ登録しない
+41. 美月(CEO専属AI秘書)・楓(AI-PMO)は設計記録のみ(準備中)。agent定義・モデル消費・DB権限・外部送信権限を与えない
+
 ## V4再監査追補(2026-07-15)
 
 24. owner専用POST APIはactor文字列だけを信用せず、UIが付ける確認ヘッダー・same-origin `Origin`・`Sec-Fetch-Site`を共通境界で検査する。ローカル単一利用のCSRF/誤操作防止であり、クラウド移行時はログイン/セッション認証へ置換する

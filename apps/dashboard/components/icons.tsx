@@ -129,6 +129,12 @@ export const IconReport = (p: IconProps) => (
     <path d="M14 3v5h5M9 13h6M9 17h6" />
   </Svg>
 );
+export const IconChart = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 20V6M4 20h16" />
+    <path d="M8 16v-4M12 16V8M16 16v-6M20 16v-9" />
+  </Svg>
+);
 export const IconSettings = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="3" />

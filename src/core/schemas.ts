@@ -83,6 +83,11 @@ export const postPlanArtifactSchema = z
     outline: z.array(z.string().min(1).max(200)).min(1).max(10),
     ctaIdea: z.string().min(1).max(200),
     sourceIds: z.array(z.string()).max(10).default([]),
+    /** V6-E: CEO承認済み改善指示の採用記録(任意・最大3件)。採用理由を企画成果物へ残す */
+    appliedImprovements: z
+      .array(z.object({ proposalId: z.string().min(1).max(40), reason: z.string().min(1).max(300) }).strict())
+      .max(3)
+      .optional(),
   })
   .strict();
 export type PostPlan = z.infer<typeof postPlanArtifactSchema>;
@@ -513,6 +518,144 @@ export const DEFAULT_OPERATION_SETTINGS: OperationSettings = {
   ownerDailyMinutes: 30,
   timezone: "Asia/Tokyo",
 };
+
+// ---- V6: 改善提案・CEO判断・事業成果 ----
+
+/** V6再レビューP2-1: 一度に変えられる主要変数はこの6種から必ず1つだけ(自由文字列を許さない) */
+export const TEST_VARIABLES = ["pillar", "format", "cta", "template", "variant", "posting_time"] as const;
+export type TestVariable = (typeof TEST_VARIABLES)[number];
+
+const GROUP_AXES = ["pillar", "format", "template", "templateVersion", "variant", "cta"] as const;
+const FACT_METRICS = [
+  "reach",
+  "profileViews",
+  "saves",
+  "shares",
+  "comments",
+  "dmStarts",
+  "followerCount",
+  "saveRate",
+  "shareRate",
+  "profileViewRate",
+  "dmStartRate",
+  "commentRate",
+] as const;
+
+/**
+ * V6再レビューP1-2: snapshot内の事実への構造化参照。
+ * AIの自由文の数値は信用せず、通常コードが「参照先の実在」と「valueの完全一致」を検査する。
+ * observation本文もこの参照から通常コードが生成する。
+ */
+export const structuredFactRefSchema = z.union([
+  z
+    .object({
+      scope: z.literal("post"),
+      postId: z.string().min(1).max(40),
+      metric: z.enum(FACT_METRICS),
+      value: z.number().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      scope: z.literal("group"),
+      axis: z.enum(GROUP_AXES),
+      groupKey: z.string().min(1).max(120),
+      stat: z.enum(["median", "mean", "total"]),
+      metric: z.enum(FACT_METRICS),
+      value: z.number().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      scope: z.literal("group"),
+      axis: z.enum(GROUP_AXES),
+      groupKey: z.string().min(1).max(120),
+      stat: z.literal("sampleCount"),
+      value: z.number().int().min(0),
+    })
+    .strict(),
+  z
+    .object({
+      scope: z.literal("coverage"),
+      field: z.enum(["publishedCount", "measuredCount", "overdueCount", "notDueCount"]),
+      value: z.number().int().min(0),
+    })
+    .strict(),
+]);
+export type StructuredFactRefInput = z.infer<typeof structuredFactRefSchema>;
+
+/**
+ * 改善提案(V6-C)。AI社員(蓮・湊など)が analysis snapshot の事実に紐づけて作る「提案」。
+ * 決定ではない。承認・却下は improvementDecisionInputSchema(owner専用)で別に記録する。
+ * observation(事実文)は入力に含めない — structuredFactRefsから通常コードが生成する(P1-2)。
+ */
+export const improvementProposalInputSchema = z
+  .object({
+    kind: z.literal("improvement_proposal"),
+    analysisSnapshotId: z.string().min(1).max(40),
+    /** 提案者のAI社員ID(emp_ren等)。ownerは提案者になれない(判断者だから) */
+    authorEmployeeId: z.string().min(1).max(40),
+    title: z.string().min(4).max(120),
+    /** 根拠となるsnapshot内の事実(実在+値の完全一致を通常コードが検査する) */
+    structuredFactRefs: z.array(structuredFactRefSchema).min(1).max(8),
+    /** 仮説(断定しない。「傾向の可能性」「追加検証が必要」の表現。数値はここに書かない) */
+    hypothesis: z.string().min(10).max(500),
+    /** 根拠: snapshotのevidencePostIdsに含まれる投稿ID(実在検査される) */
+    evidenceRefs: z.array(z.string().min(1).max(40)).min(1).max(20),
+    /** 一度に変える主要変数(6種から1つだけ) */
+    testVariable: z.enum(TEST_VARIABLES),
+    /** 変更内容の構造化(from/to/対象条件)。複数変数の同時変更はtestVariable enumで構造的に不可 */
+    testChange: z
+      .object({
+        from: z.string().min(1).max(120).optional(),
+        to: z.string().min(1).max(120),
+        condition: z.string().max(200).optional(),
+      })
+      .strict(),
+    /** 期待する観測シグナル(例: 保存率の中央値が上がる)。保証ではない */
+    expectedSignal: z.string().min(4).max(200),
+    proposedAction: z.string().min(10).max(500),
+    risk: z.string().min(4).max(300),
+    /** 有効期限(JST業務日)。期限切れはkickoffで利用されない */
+    expiresAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  })
+  .strict();
+export type ImprovementProposalInput = z.infer<typeof improvementProposalInputSchema>;
+
+export const IMPROVEMENT_DECISIONS = ["approved", "rejected", "revision_requested", "superseded"] as const;
+export type ImprovementDecision = (typeof IMPROVEMENT_DECISIONS)[number];
+
+/** CEO判断(append-only)。却下・修正依頼・棚上げは理由必須 */
+export const improvementDecisionInputSchema = z
+  .object({
+    proposalId: z.string().min(1).max(40),
+    decision: z.enum(IMPROVEMENT_DECISIONS),
+    reason: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((v) => v.decision === "approved" || (v.reason !== undefined && v.reason.trim().length > 0), {
+    message: "却下・修正依頼・supersededには理由(reason)が必要です",
+  });
+export type ImprovementDecisionInput = z.infer<typeof improvementDecisionInputSchema>;
+
+export const BUSINESS_OUTCOME_KINDS = ["inquiry", "estimate", "order"] as const;
+export const BUSINESS_OUTCOME_SOURCES = ["instagram", "referral", "website", "unknown"] as const;
+
+/**
+ * 事業成果の手動記録(V6-G)。owner専用・匿名。
+ * 顧客名・電話・メール・LINE ID・DM原文など個人を特定できる情報は保存しない(通常コードで拒否)。
+ */
+export const businessOutcomeInputSchema = z
+  .object({
+    occurredOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    kind: z.enum(BUSINESS_OUTCOME_KINDS),
+    source: z.enum(BUSINESS_OUTCOME_SOURCES),
+    relatedPostId: z.string().min(1).max(40).nullable().optional(),
+    amountYen: z.number().int().min(0).max(100_000_000).nullable().optional(),
+    anonymizedNote: z.string().max(200).nullable().optional(),
+  })
+  .strict();
+export type BusinessOutcomeInput = z.infer<typeof businessOutcomeInputSchema>;
 
 export const modelProfileSchema = z.enum(MODEL_PROFILES);
 

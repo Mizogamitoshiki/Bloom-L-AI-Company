@@ -365,4 +365,73 @@ CREATE TABLE IF NOT EXISTS post_media_uploads (
 CREATE UNIQUE INDEX IF NOT EXISTS post_media_uploads_post_idx_uq ON post_media_uploads(post_id, image_index);
 CREATE INDEX IF NOT EXISTS post_media_uploads_sha_idx ON post_media_uploads(provider, sha256);
 
+-- V6: 投稿後分析・改善ループ(migration #11 と同期)
+CREATE TABLE IF NOT EXISTS analysis_snapshots (
+  id text PRIMARY KEY,
+  window_days integer NOT NULL,
+  period_start date,
+  period_end date,
+  generated_at timestamptz NOT NULL,
+  source_data_hash text NOT NULL,
+  snapshot_json jsonb NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS analysis_snapshots_window_hash_uq ON analysis_snapshots(window_days, source_data_hash);
+CREATE INDEX IF NOT EXISTS analysis_snapshots_window_idx ON analysis_snapshots(window_days, created_at);
+
+CREATE TABLE IF NOT EXISTS improvement_proposals (
+  id text PRIMARY KEY,
+  analysis_snapshot_id text NOT NULL REFERENCES analysis_snapshots(id),
+  author_employee_id text NOT NULL REFERENCES employees(id),
+  title text NOT NULL,
+  observation text NOT NULL,
+  hypothesis text NOT NULL,
+  evidence_refs_json jsonb NOT NULL,
+  structured_fact_refs_json jsonb,
+  test_variable text NOT NULL,
+  test_change_json jsonb,
+  expected_signal text NOT NULL,
+  proposed_action text NOT NULL,
+  risk text NOT NULL,
+  expires_at date NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS improvement_proposals_snapshot_idx ON improvement_proposals(analysis_snapshot_id);
+
+-- CEO判断履歴はappend-only(アプリロールに REVOKE UPDATE, DELETE を適用する)
+CREATE TABLE IF NOT EXISTS improvement_decisions (
+  id text PRIMARY KEY,
+  proposal_id text NOT NULL REFERENCES improvement_proposals(id),
+  decision text NOT NULL,
+  reason text,
+  decided_by text NOT NULL,
+  decided_at timestamptz NOT NULL,
+  decision_sequence integer NOT NULL
+);
+CREATE INDEX IF NOT EXISTS improvement_decisions_proposal_idx ON improvement_decisions(proposal_id, decided_at);
+CREATE UNIQUE INDEX IF NOT EXISTS improvement_decisions_proposal_sequence_uq ON improvement_decisions(proposal_id, decision_sequence);
+
+CREATE TABLE IF NOT EXISTS post_improvement_directives (
+  id text PRIMARY KEY,
+  post_id text NOT NULL REFERENCES posts(id),
+  proposal_id text NOT NULL REFERENCES improvement_proposals(id),
+  reason text,
+  applied_by text NOT NULL,
+  applied_at timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS post_improvement_directives_uq ON post_improvement_directives(post_id, proposal_id);
+
+CREATE TABLE IF NOT EXISTS business_outcomes (
+  id text PRIMARY KEY,
+  occurred_on date NOT NULL,
+  kind text NOT NULL,
+  source text NOT NULL,
+  related_post_id text REFERENCES posts(id),
+  amount_yen integer,
+  anonymized_note text,
+  created_by text NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS business_outcomes_occurred_idx ON business_outcomes(occurred_on, kind);
+
 COMMIT;

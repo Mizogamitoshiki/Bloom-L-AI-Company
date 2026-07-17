@@ -10,6 +10,7 @@ import {
   IconReport,
   IconMeeting,
   IconTemplate,
+  IconChart,
   IconSettings,
   IconBell,
   IconQuestion,
@@ -32,6 +33,7 @@ const NAV: NavItem[] = [
   { href: "/calendar", label: "カレンダー", Icon: IconCalendar },
   { href: "/portfolio", label: "実績素材", Icon: IconImage },
   { href: "/reports", label: "日報", Icon: IconReport },
+  { href: "/analytics", label: "成長分析", Icon: IconChart },
   { href: "/meetings", label: "会議", Icon: IconMeeting },
   { href: "/templates", label: "テンプレート", Icon: IconTemplate },
 ];

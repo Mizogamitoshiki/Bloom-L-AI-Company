@@ -28,9 +28,20 @@ pnpm --silent company status
 ### 2. 実行計画(葵として判断)
 - 承認待ち(`counts.awaitingApproval`)が **5件以上** なら生成系をスキップし、手順6のサマリーへ(理由を報告)
 - `failed` のタスクがあれば内容を確認し、再開が妥当なら `pnpm company resume --task <id> --actor aoi`
+- **V6: CEO承認済みの改善指示を取得する(0件でも従来どおり進める)**:
+```bash
+pnpm --silent company improvement-directives
+```
+  - 返るのは「CEOがapproved・有効期限内」の指示だけ(最大3件)。rejected/revision_requested/superseded/期限切れ/未判断は**構造的に含まれない**ので、この出力以外の改善案を使わない
+  - 指示がある場合、昊(sora)への入力に含め、post_planの`appliedImprovements`(proposalIdと採用理由・最大3件)へ記録させる
+  - ブランドルール・公開ガード(QA/権利/承認)より改善指示を優先しない。投稿頻度・予算は変更しない
 - 新規投稿を作る場合(1日最大3本、通常は1本):
 ```bash
 pnpm company create-post --json '{"pillar":"6","format":"carousel","title":"<管理用タイトル>","plannedDate":"<YYYY-MM-DD>"}'
+```
+- **V6: 改善指示を使った投稿には適用を記録する(冪等 — 再実行しても二重適用にならない)**:
+```bash
+pnpm company improvement-apply --post <postId> --proposal <proposalId> --reason "<採用理由>" --actor aoi
 ```
 - 計画をJSONファイル(runs/<date>/plan.json)にWriteして登録する。**stepKeyは必須**:
 ```json

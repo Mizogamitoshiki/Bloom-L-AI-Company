@@ -87,3 +87,14 @@ export function cloudMutationBlockedReason(env: EnvLike): string | null {
   }
   return null;
 }
+
+/**
+ * V6再レビューP1-3: 機微な読み取り(改善提案・CEO判断・適用履歴・受注金額・匿名メモ等)の
+ * クラウド保護。owner認証が未確定のcloud環境では読み取りもfail closedで拒否する。
+ * ローカル単一ユーザー運用(既定)はnull(従来どおり閲覧可能)。即席認証は作らない。
+ */
+export function cloudSensitiveReadBlockedReason(env: EnvLike): string | null {
+  if (resolveRuntimeMode(env) !== "cloud") return null;
+  if (ownerAuthConfigured(env)) return null;
+  return "クラウド実行では代表者認証が未確定のため、分析・改善提案・事業成果の閲覧を制限しています(fail closed)";
+}

@@ -102,6 +102,47 @@ describe("マイグレーション", () => {
     second.sqlite.close();
   });
 
+  it("V6判断順序migrationは同一ミリ秒の既存履歴を挿入順で連番化する", () => {
+    const { sqlite } = openDb(path.join(dir, "decision-sequence.db"));
+    // migration #13適用前の形へ戻し、既存履歴を再現する。
+    sqlite.exec("DROP INDEX improvement_decisions_proposal_sequence_uq");
+    sqlite.exec("DELETE FROM schema_migrations WHERE id = 13");
+    sqlite.exec(`
+      INSERT INTO departments (id, name, status) VALUES ('dept_marketing', 'AIマーケティング部', 'active');
+      INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile)
+        VALUES ('emp_ren', 'dept_marketing', '蓮', '集客戦略責任者', 'ren', 'standard');
+      INSERT INTO analysis_snapshots
+        (id, window_days, generated_at, source_data_hash, snapshot_json, created_at)
+        VALUES ('snap1', 3, '2026-07-17T00:00:00.000Z', 'hash1', '{}', '2026-07-17T00:00:00.000Z');
+      INSERT INTO improvement_proposals
+        (id, analysis_snapshot_id, author_employee_id, title, observation, hypothesis, evidence_refs_json,
+         test_variable, expected_signal, proposed_action, risk, expires_at, created_at)
+        VALUES ('proposal1', 'snap1', 'emp_ren', '提案', '観察', '仮説', '[]', 'cta', 'signal', 'action', 'risk',
+                '2026-07-31', '2026-07-17T00:00:00.000Z');
+      INSERT INTO improvement_decisions
+        (id, proposal_id, decision, decided_by, decided_at, decision_sequence)
+        VALUES ('decision1', 'proposal1', 'approved', 'owner', '2026-07-17T01:00:00.000Z', NULL);
+      INSERT INTO improvement_decisions
+        (id, proposal_id, decision, reason, decided_by, decided_at, decision_sequence)
+        VALUES ('decision2', 'proposal1', 'rejected', '見送り', 'owner', '2026-07-17T01:00:00.000Z', NULL);
+    `);
+
+    expect(runMigrations(sqlite)).toEqual([13]);
+    const rows = sqlite
+      .prepare("SELECT id, decision_sequence FROM improvement_decisions ORDER BY decision_sequence")
+      .all() as { id: string; decision_sequence: number }[];
+    expect(rows).toEqual([
+      { id: "decision1", decision_sequence: 1 },
+      { id: "decision2", decision_sequence: 2 },
+    ]);
+    expect(() =>
+      sqlite.prepare(
+        "INSERT INTO improvement_decisions (id, proposal_id, decision, decided_by, decided_at, decision_sequence) VALUES ('decision3','proposal1','approved','owner','2026-07-17T01:00:00.000Z',2)",
+      ).run(),
+    ).toThrow(/UNIQUE/i);
+    sqlite.close();
+  });
+
   it("途中失敗時はロールバックされ、部分適用が残らない", () => {
     const { sqlite } = openDb(path.join(dir, "fail.db"));
     const failing: Migration = {

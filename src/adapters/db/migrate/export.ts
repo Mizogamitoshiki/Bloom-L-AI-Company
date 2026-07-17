@@ -91,6 +91,29 @@ export const EXPORT_TABLES: ExportTableSpec[] = [
   },
   { name: "instagram_publish_jobs", pk: ["id"], fks: [{ column: "post_id", refTable: "posts", refColumn: "id", nullable: false }] },
   { name: "post_media_uploads", pk: ["id"], fks: [{ column: "post_id", refTable: "posts", refColumn: "id", nullable: false }] },
+  { name: "analysis_snapshots", pk: ["id"], fks: [] },
+  {
+    name: "improvement_proposals",
+    pk: ["id"],
+    fks: [
+      { column: "analysis_snapshot_id", refTable: "analysis_snapshots", refColumn: "id", nullable: false },
+      { column: "author_employee_id", refTable: "employees", refColumn: "id", nullable: false },
+    ],
+  },
+  {
+    name: "improvement_decisions",
+    pk: ["id"],
+    fks: [{ column: "proposal_id", refTable: "improvement_proposals", refColumn: "id", nullable: false }],
+  },
+  {
+    name: "post_improvement_directives",
+    pk: ["id"],
+    fks: [
+      { column: "post_id", refTable: "posts", refColumn: "id", nullable: false },
+      { column: "proposal_id", refTable: "improvement_proposals", refColumn: "id", nullable: false },
+    ],
+  },
+  { name: "business_outcomes", pk: ["id"], fks: [{ column: "related_post_id", refTable: "posts", refColumn: "id", nullable: true }] },
 ];
 
 export interface ExportManifestTable {

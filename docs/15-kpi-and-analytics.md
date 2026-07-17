@@ -59,3 +59,10 @@
 - 日報基盤を実装(`buildDailyReport`)。**全項目を通常コードで集計**(AI不使用)。推定値は「推定」と明示し、売上・成果は捏造しない(未入力は未入力のまま)
 - 集計項目: 作成投稿と現在状態 / 完了・失敗タスク / 権利ブロック / 承認待ち / 社員別稼働 / 推定利用量 / heavy昇格回数 / エージェント起動回数 / 停止理由 / 代表者への依頼 / 翌日の推奨作業
 - CLI(`company daily-report`: 湊のreportタスク経由で冪等保存)とUI(`/reports`)の両方から確認可能
+
+### V6追補(2026-07-17 実装反映)
+
+- 分析基盤を実装: `analysis_snapshots`(通常コードの決定的集計・append-only・sourceDataHash冪等)。3日窓/7日窓を分離し、未取得(null)と0を区別、率は分母が正のときのみ、比較は中央値を主要表示
+- 改善ループを実装: AIの改善提案(improvement_proposals)→ CEO判断(improvement_decisions・append-only・owner専用)→ 承認済みだけが次回kickoffへ(最大3件・二重適用防止)
+- 事業成果(問い合わせ/見積もり/受注)はownerが匿名で手動記録し、KPIツリー(/analytics)へ接続。未取得は「未取得」表示
+- §5の改善ループ・10本未満の断定禁止は通常コード(`findForbiddenAssertions`)で構造的に強制される。詳細: `27-v6-growth-loop.md`

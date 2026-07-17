@@ -356,6 +356,101 @@ export const instagramPublishJobs = sqliteTable(
   ],
 );
 
+// V6: 分析スナップショット(append-only)。通常コードが決定的に生成したファクトJSONのみを保存する。
+// AI生成文章は混ぜない。(window_days, source_data_hash)一意で冪等。migration #11 と同期。
+export const analysisSnapshots = sqliteTable(
+  "analysis_snapshots",
+  {
+    id: text("id").primaryKey(),
+    windowDays: integer("window_days").notNull(), // 3 | 7(窓を混ぜない)
+    periodStart: text("period_start"),
+    periodEnd: text("period_end"),
+    generatedAt: text("generated_at").notNull(),
+    sourceDataHash: text("source_data_hash").notNull(),
+    snapshotJson: text("snapshot_json").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("analysis_snapshots_window_hash_uq").on(t.windowDays, t.sourceDataHash),
+    index("analysis_snapshots_window_idx").on(t.windowDays, t.createdAt),
+  ],
+);
+
+// V6: 改善提案(AIの提案。決定ではない)。現在状態はimprovement_decisionsから導出する
+export const improvementProposals = sqliteTable(
+  "improvement_proposals",
+  {
+    id: text("id").primaryKey(),
+    analysisSnapshotId: text("analysis_snapshot_id").notNull().references(() => analysisSnapshots.id),
+    authorEmployeeId: text("author_employee_id").notNull().references(() => employees.id),
+    title: text("title").notNull(),
+    observation: text("observation").notNull(),
+    hypothesis: text("hypothesis").notNull(),
+    evidenceRefsJson: text("evidence_refs_json").notNull(),
+    // V6再レビューP1-2: snapshot内事実への構造化参照(実在+完全一致を検査済みの参照のみ保存)
+    structuredFactRefsJson: text("structured_fact_refs_json"),
+    testVariable: text("test_variable").notNull(), // P2-1: pillar|format|cta|template|variant|posting_time
+    // P2-1: 変更内容の構造化(from/to/condition)
+    testChangeJson: text("test_change_json"),
+    expectedSignal: text("expected_signal").notNull(),
+    proposedAction: text("proposed_action").notNull(),
+    risk: text("risk").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("improvement_proposals_snapshot_idx").on(t.analysisSnapshotId)],
+);
+
+// V6: CEO判断履歴(append-only。UPDATE/DELETE禁止)。decided_byは常にowner(core層で強制)
+export const improvementDecisions = sqliteTable(
+  "improvement_decisions",
+  {
+    id: text("id").primaryKey(),
+    proposalId: text("proposal_id").notNull().references(() => improvementProposals.id),
+    decision: text("decision").notNull(), // approved | rejected | revision_requested | superseded
+    reason: text("reason"),
+    decidedBy: text("decided_by").notNull(),
+    decidedAt: text("decided_at").notNull(),
+    // V6最終レビュー: proposal内の明示的な判断順序。同一ミリ秒でも最新判断を一意に導出する。
+    decisionSequence: integer("decision_sequence").notNull(),
+  },
+  (t) => [
+    index("improvement_decisions_proposal_idx").on(t.proposalId, t.decidedAt),
+    uniqueIndex("improvement_decisions_proposal_sequence_uq").on(t.proposalId, t.decisionSequence),
+  ],
+);
+
+// V6: 改善指示の適用記録。(post_id, proposal_id)一意でkickoff再実行の二重適用を構造的に防ぐ
+export const postImprovementDirectives = sqliteTable(
+  "post_improvement_directives",
+  {
+    id: text("id").primaryKey(),
+    postId: text("post_id").notNull().references(() => posts.id),
+    proposalId: text("proposal_id").notNull().references(() => improvementProposals.id),
+    reason: text("reason"),
+    appliedBy: text("applied_by").notNull(),
+    appliedAt: text("applied_at").notNull(),
+  },
+  (t) => [uniqueIndex("post_improvement_directives_uq").on(t.postId, t.proposalId)],
+);
+
+// V6: 事業成果(owner手動・匿名)。顧客を特定できる情報は保存しない(入力時に通常コードで拒否)
+export const businessOutcomes = sqliteTable(
+  "business_outcomes",
+  {
+    id: text("id").primaryKey(),
+    occurredOn: text("occurred_on").notNull(),
+    kind: text("kind").notNull(), // inquiry | estimate | order
+    source: text("source").notNull(), // instagram | referral | website | unknown
+    relatedPostId: text("related_post_id").references(() => posts.id),
+    amountYen: integer("amount_yen"),
+    anonymizedNote: text("anonymized_note"),
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("business_outcomes_occurred_idx").on(t.occurredOn, t.kind)],
+);
+
 // V5.2: 公開画像URLの記録。export bundleの確定画像を公開ストレージへ配置した結果。
 // トークン等の秘密値は保存しない(publicUrlは検証済みの公開HTTPS URLのみ)。
 export const postMediaUploads = sqliteTable(
