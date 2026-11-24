@@ -190,3 +190,12 @@ export const IconTemplate = (p: IconProps) => (
     <rect x="14" y="15" width="7" height="6" rx="1" />
   </Svg>
 );
+/** V10.2: サイトサンプル(ブラウザ枠+ヒーロー+2カラム) */
+export const IconLayout = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 9h18" />
+    <path d="M9 9v11" />
+    <path d="M13 14h5" />
+  </Svg>
+);

@@ -38,7 +38,7 @@ describe("7. AI向けcompany CLIから承認操作ができない", () => {
 
   it("エージェント定義: Bash権限を持つのはオーケストレーター(aoi)のみ", () => {
     const agentsDir = path.join(root, ".claude", "agents");
-    const refs = ["aoi", "ren", "rin", "sora", "kotoha", "tsumugi", "shion", "minato", "hinata"];
+    const refs = ["aoi", "ren", "rin", "sora", "kotoha", "tsumugi", "shion", "minato", "tsubaki", "hayate"];
     for (const ref of refs) {
       const src = readFileSync(path.join(agentsDir, `${ref}.md`), "utf8");
       const toolsLine = src.split("\n").find((l) => l.startsWith("tools:")) ?? "";

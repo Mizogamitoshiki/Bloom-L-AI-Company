@@ -49,7 +49,12 @@ const EMPLOYEE_HOME: Record<string, AgentPoint> = {
   emp_tsumugi: { x: 18.0, y: 20.5 },
   emp_shion: { x: 42.0, y: 21.0 },
   emp_minato: { x: 25.0, y: 62.5 },
-  emp_hinata: { x: 52.0, y: 84.5 },
+  // 2026-07-17 組織拡張(DECISIONS.md D-16)。座標未設定だと全員が既定値{48,50}へ重なって
+  // 表示されるため、既存デスクと重ならない座標を明示する。
+  emp_mizuki: { x: 82.0, y: 30.0 },
+  emp_kikyou: { x: 32.0, y: 44.0 },
+  emp_kaede: { x: 58.0, y: 76.0 },
+  emp_azusa: { x: 8.0, y: 60.0 },
 };
 
 const LOUNGE_POINTS: readonly AgentPoint[] = [

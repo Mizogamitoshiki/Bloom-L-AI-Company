@@ -114,6 +114,10 @@ export const EXPORT_TABLES: ExportTableSpec[] = [
     ],
   },
   { name: "business_outcomes", pk: ["id"], fks: [{ column: "related_post_id", refTable: "posts", refColumn: "id", nullable: true }] },
+  // V10: サイトサンプル(docs/32)
+  { name: "sample_requests", pk: ["id"], fks: [] },
+  { name: "sample_assets", pk: ["id"], fks: [{ column: "request_id", refTable: "sample_requests", refColumn: "id", nullable: false }] },
+  { name: "site_samples", pk: ["id"], fks: [{ column: "request_id", refTable: "sample_requests", refColumn: "id", nullable: false }] },
 ];
 
 export interface ExportManifestTable {

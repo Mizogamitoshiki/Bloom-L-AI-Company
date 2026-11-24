@@ -11,13 +11,19 @@ import * as howto from "./tpl-howto";
 import * as news from "./tpl-news";
 import * as portfolio from "./tpl-portfolio";
 import * as compare from "./tpl-compare";
+import * as sample from "./tpl-sample";
 
-export type CopyKind = "copy" | "news_copy" | "portfolio_copy" | "compare_copy";
+export type CopyKind = "copy" | "news_copy" | "portfolio_copy" | "compare_copy" | "sample_copy";
 
 /** DBへ保存しない、レンダリング中だけ有効な検証済み素材。 */
 export interface TemplateRenderAssets {
   portfolioImageDataUri?: string;
   portfolioAssetSha256?: string;
+  /** V10 tpl-sample: 撮影画像(PC/スマホのファーストビュー)。hashはspec.screenshotsと照合される */
+  sampleShots?: {
+    pcFold: { dataUri: string; sha256: string };
+    spFold: { dataUri: string; sha256: string };
+  };
 }
 
 export interface TemplateDef {
@@ -69,6 +75,14 @@ export const TEMPLATES: Record<TemplateId, TemplateDef> = {
     buildPages: (spec, theme, variant) => compare.buildPages(narrow(spec, "tpl-compare"), theme, variant as compare.CompareVariant),
     layoutIds: (spec, variant) => compare.layoutIds(narrow(spec, "tpl-compare"), variant as compare.CompareVariant),
     expectedPages: () => compare.expectedPages(),
+  },
+  "tpl-sample": {
+    id: "tpl-sample", family: "sample/site-showcase", copyKind: "sample_copy", variants: sample.VARIANTS,
+    pickVariant: (spec) => sample.pickVariant(narrow(spec, "tpl-sample")),
+    enumerateSlots: (spec) => sample.enumerateSlots(narrow(spec, "tpl-sample")),
+    buildPages: (spec, theme, variant, assets) => sample.buildPages(narrow(spec, "tpl-sample"), theme, variant as sample.SampleVariant, assets),
+    layoutIds: (spec, variant) => sample.layoutIds(narrow(spec, "tpl-sample"), variant as sample.SampleVariant),
+    expectedPages: (spec) => sample.expectedPages(narrow(spec, "tpl-sample")),
   },
 };
 

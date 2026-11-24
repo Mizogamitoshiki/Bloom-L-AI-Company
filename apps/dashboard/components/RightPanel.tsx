@@ -8,7 +8,7 @@ import { IconCheck } from "./icons";
 
 const HUE: Record<string, number> = {
   emp_aoi: 150, emp_ren: 210, emp_rin: 30, emp_sora: 190, emp_kotoha: 330,
-  emp_tsumugi: 270, emp_shion: 250, emp_minato: 200, emp_hinata: 45,
+  emp_tsumugi: 270, emp_shion: 250, emp_minato: 200,
 };
 
 function elapsed(startedAt: string | null, now: number): string {

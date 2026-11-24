@@ -60,7 +60,7 @@ export const PREVIEW_SPECS: CarouselSpec[] = [
       approach: { heading: "スマホ最適化と24hフォーム", body: "スマホで見やすいHPに、24時間受け付けられる問い合わせフォームを設置しました。" },
       result: { heading: "時間外も受けられる構成に", body: "営業時間外でも予約希望を記録できるフォーム導線を設計し、翌朝そのまま折り返せる構成にしました。" },
       tech: { items: ["Next.js", "問い合わせフォーム", "スマホ対応", "予約導線"] },
-      ctaMessage: "同じお悩みがあれば、DMで「相談」とお送りください。",
+      ctaMessage: "同じお悩みがあれば、\n「相談」とDMしてください。",
     },
     displayName: "架空事例(プレビュー)", anonymous: true,
   }),
@@ -75,7 +75,7 @@ export const PREVIEW_SPECS: CarouselSpec[] = [
         { before: "情報が探しにくい", after: "1か所に整理して掲載" },
         { before: "時間外は受けとめ不可", after: "時間外も予約を記録" },
       ],
-      verdict: { heading: "当てはまるほど余地が大きい", body: "3つ以上当てはまるなら、HPで解決できる余地が大きい状態です。まずは無料相談から。" },
+      verdict: { heading: "当てはまるほど余地が大きい", body: "3つ以上当てはまるなら、見直しで解決できる余地が大きい状態です。まずはDMでご相談ください。" },
       ctaMessage: "診断に使えるので、保存して見返してください。",
     },
   }),
@@ -146,6 +146,68 @@ async function portfolioPreviewFixture(): Promise<{
   };
 }
 
+/** V10: Bloom-L所有の架空サンプルサイト画面(PC/スマホ)。撮影画像の差し込み経路をプレビューする。 */
+async function samplePreviewFixture(): Promise<{ spec: CarouselSpec; assets: TemplateRenderAssets }> {
+  const pcSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900">
+    <rect width="1440" height="900" fill="#fbfbf8"/>
+    <rect width="1440" height="96" fill="#1f2a44"/>
+    <text x="64" y="62" font-family="sans-serif" font-size="34" font-weight="700" fill="#fff">SENSHU WORKS(サンプル)</text>
+    <rect x="64" y="160" width="700" height="56" rx="10" fill="#1f2a44"/>
+    <rect x="64" y="240" width="520" height="24" rx="12" fill="#8a93a6"/>
+    <rect x="64" y="284" width="460" height="24" rx="12" fill="#b7bfcc"/>
+    <rect x="64" y="350" width="260" height="64" rx="32" fill="#c9a24b"/>
+    <rect x="860" y="150" width="516" height="330" rx="24" fill="#dfe6f0"/>
+    <rect x="64" y="560" width="400" height="260" rx="20" fill="#fff" stroke="#dfe3ea" stroke-width="4"/>
+    <rect x="520" y="560" width="400" height="260" rx="20" fill="#fff" stroke="#dfe3ea" stroke-width="4"/>
+    <rect x="976" y="560" width="400" height="260" rx="20" fill="#fff" stroke="#dfe3ea" stroke-width="4"/>
+  </svg>`;
+  const spSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="780" height="1688">
+    <rect width="780" height="1688" fill="#fbfbf8"/>
+    <rect width="780" height="150" fill="#1f2a44"/>
+    <text x="48" y="96" font-family="sans-serif" font-size="44" font-weight="700" fill="#fff">SENSHU WORKS</text>
+    <rect x="48" y="230" width="684" height="420" rx="28" fill="#dfe6f0"/>
+    <rect x="48" y="700" width="560" height="60" rx="12" fill="#1f2a44"/>
+    <rect x="48" y="790" width="480" height="30" rx="15" fill="#8a93a6"/>
+    <rect x="48" y="840" width="420" height="30" rx="15" fill="#b7bfcc"/>
+    <rect x="48" y="920" width="400" height="96" rx="48" fill="#c9a24b"/>
+    <rect x="48" y="1100" width="684" height="240" rx="24" fill="#fff" stroke="#dfe3ea" stroke-width="6"/>
+    <rect x="48" y="1380" width="684" height="240" rx="24" fill="#fff" stroke="#dfe3ea" stroke-width="6"/>
+  </svg>`;
+  const toPng = async (svg: string): Promise<Buffer> =>
+    sharp(Buffer.from(svg)).flatten({ background: "#ffffff" }).removeAlpha().toColourspace("srgb").png().toBuffer();
+  const pc = await toPng(pcSvg);
+  const sp = await toPng(spSvg);
+  const pcSha = createHash("sha256").update(pc).digest("hex");
+  const spSha = createHash("sha256").update(sp).digest("hex");
+  const spec = carouselSpecSchema.parse({
+    kind: "carousel_spec", templateId: "tpl-sample", pillar: "5", sourceCopyArtifactId: "preview-sample",
+    slides: {
+      cover: { title: "紙の見積もりだけの工務店が、HPを持ったら", subtitle: "架空の工務店を想定したサンプル" },
+      scene: { heading: "紹介頼みで、初めての人に会社が見えない", body: "相見積もりの相手先に「どんな会社か」を伝える手段が名刺と口頭だけ。夜に検索されても何も出てこない状態を想定しました。" },
+      screens: [{ caption: "スマホでは施工の流れと連絡先を最初に" }, { caption: "PCでは実績の並びと会社の雰囲気を一覧で" }],
+      behind: { heading: "1ページに絞って、迷わせない", body: "ページを増やさず、TOP1枚で「何をしている会社か・どう頼むか」が終わる構成にしました。更新はお知らせ欄だけに限定しています。" },
+      plan: { planId: "ume", note: "TOP+2ページ・フォーム付きで、梅プランの標準構成に収まります。" },
+      ctaMessage: "同じ業種でサンプルを見たい方は、\nDMで「サンプル」と送ってください。",
+    },
+    sampleId: "preview-sample-id",
+    sampleTitle: "泉州ワークス(サンプル)",
+    screenshots: {
+      pcFold: { name: "pc-fold", sha256: pcSha, width: 1440, height: 900, safeRelativePath: "06_template-previews/_fixtures/sample-pc-fold.png" },
+      spFold: { name: "sp-fold", sha256: spSha, width: 780, height: 1688, safeRelativePath: "06_template-previews/_fixtures/sample-sp-fold.png" },
+    },
+    priceBand: { planId: "ume", label: "梅プラン", build: "45,000円〜 +tax", maintenance: "月7,000円〜 +tax", disclaimer: "価格は税別(+tax)の目安です。内容により個別にお見積もりします。" },
+  });
+  return {
+    spec,
+    assets: {
+      sampleShots: {
+        pcFold: { dataUri: `data:image/png;base64,${pc.toString("base64")}`, sha256: pcSha },
+        spFold: { dataUri: `data:image/png;base64,${sp.toString("base64")}`, sha256: spSha },
+      },
+    },
+  };
+}
+
 /** specの公開テキストを集める */
 function collectText(spec: CarouselSpec): string {
   const parts: string[] = [];
@@ -198,7 +260,7 @@ async function contactSheet(files: string[], outFile: string): Promise<void> {
  */
 export async function generateTemplatePreviews(
   outRoot: string,
-  opts: { version?: number; statusOf?: (templateId: string) => string } = {},
+  opts: { version?: number; statusOf?: (templateId: string) => string; only?: string } = {},
 ): Promise<PreviewVariantMeta[]> {
   const version = opts.version ?? 1;
   const theme = loadTheme();
@@ -206,8 +268,12 @@ export async function generateTemplatePreviews(
   const coverThumbs: string[] = [];
   const label = await labelBuffer();
   const portfolioFixture = await portfolioPreviewFixture();
+  const sampleFixture = await samplePreviewFixture();
+  // only指定時は1系統だけ再生成する(他系統の版を進めずに済む)。overview等の横断成果物は更新しない
+  const allSpecs = [...PREVIEW_SPECS, sampleFixture.spec];
+  const specs = opts.only ? allSpecs.filter((s) => s.templateId === opts.only) : allSpecs;
 
-  for (const spec of PREVIEW_SPECS) {
+  for (const spec of specs) {
     const tpl = templateFor(spec.templateId);
     const variants = (TEMPLATES as Record<string, { variants: readonly string[] }>)[spec.templateId]!.variants;
     for (const variant of variants) {
@@ -223,6 +289,7 @@ export async function generateTemplatePreviews(
       const render = await renderCarousel(variantSpec, dir, {
         templateVersion: version,
         ...(spec.templateId === "tpl-portfolio" ? { assets: portfolioFixture.assets } : {}),
+        ...(spec.templateId === "tpl-sample" ? { assets: sampleFixture.assets } : {}),
       });
       // 架空データラベルを各ページへ合成(元は上書き)
       for (let i = 0; i < render.files.length; i++) {
@@ -255,7 +322,7 @@ export async function generateTemplatePreviews(
         contentQa: cqa, designQa, visualQa: null,
         tokens: { designSystem: DESIGN_SYSTEM_VERSION, schema: CAROUSEL_SCHEMA_VERSION, canvas: `${CANVAS.width}x${CANVAS.height}` },
         rights: theme.logo
-          ? `Bloom-L所有のロゴ・カラー・Noto Sans JP(SIL OFL 1.1)。第三者素材なし${spec.templateId === "tpl-portfolio" ? "。Bloom-L所有の架空HP画面fixture" : ""}`
+          ? `Bloom-L所有のロゴ・カラー・Noto Sans JP(SIL OFL 1.1)。第三者素材なし${spec.templateId === "tpl-portfolio" || spec.templateId === "tpl-sample" ? "。Bloom-L所有の架空HP画面fixture" : ""}`
           : "ロゴ未検出",
         fixtureKind: "fictional",
         generatedNote: "固定fixtureによるゴールデンプレビュー(架空データ)。全variantのQA合格+代表者承認まで公開不可。",
@@ -264,6 +331,9 @@ export async function generateTemplatePreviews(
       results.push(meta);
     }
   }
+
+  // only指定(部分生成)時はoverview/index.json/比較画像を触らない(全系統分の成果物を2表紙で上書きしない)
+  if (opts.only) return results;
 
   // 8表紙overview(系統×variantを4列×2行)
   const OW = 270, OH = 338, GAP = 14, COLS = 4;
@@ -304,6 +374,7 @@ async function buildComparison(outRoot: string, version: number): Promise<void> 
   const OW = 240, OH = 300, GAP = 12, COLS = 4;
   const collect = (v: number): string[] => {
     const files: string[] = [];
+    // 比較画像はv2当時の4系統8表紙で固定(tpl-sampleはv2が存在しないため対象外)
     for (const [id, variants] of Object.entries({ "tpl-howto": ["steps", "guide"], "tpl-news": ["report", "insight"], "tpl-portfolio": ["showcase", "story"], "tpl-compare": ["table", "diagnosis"] })) {
       for (const variant of variants) {
         const f = v === 2 ? path.join(outRoot, id, "v2", variant, "01.png") : path.join(outRoot, id, `v${v}`, variant, "01.png");

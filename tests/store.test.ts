@@ -122,17 +122,16 @@ describe("run-start 異常終了回収(AC-2)", () => {
 });
 
 describe("デモデータ(docs/16)", () => {
-  it("seedDemoでdemo_mode=trueになり、9名分の状態が導出される", () => {
+  it("seedDemoでdemo_mode=trueになり、全社員(14名)分の状態が導出される", () => {
     seedDemo(opened.db);
     const state = getCompanyState(opened.db);
     expect(state.demoMode).toBe(true);
-    expect(state.employees).toHaveLength(9);
+    expect(state.employees).toHaveLength(14); // 2026-07-27: 椿追加(+1)・陽葵削除(-1)で13名 → 2026-08-26 V10: 颯追加(+1)で14名
     const states = new Map(state.employees.map((e) => [e.id, e.display.state]));
     expect(states.get("emp_rin")).toBe("researching");
     expect(states.get("emp_sora")).toBe("stale"); // heartbeat途絶(AC-10)
     expect(states.get("emp_tsumugi")).toBe("error");
     expect(states.get("emp_minato")).toBe("budget_paused");
     expect(states.get("emp_kotoha")).toBe("awaiting_approval");
-    expect(states.get("emp_hinata")).toBe("idle"); // DM支援は第2段階のため待機
   });
 });

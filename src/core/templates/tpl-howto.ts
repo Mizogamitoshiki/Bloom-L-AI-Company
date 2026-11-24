@@ -18,6 +18,24 @@ export type HowtoVariant = (typeof VARIANTS)[number];
 
 const STEP_BODY_W = CONTENT_WIDTH - SPACE.xxl * 2;
 
+/**
+ * ステップ確認チェックリストの2項目目(通常コード生成)。
+ * 見出し文言に依存する動的補間は文法破綻を招くため使わない(V4.5再監査での指摘)。
+ * ページ番号でローテーションし、全ステップ同一文言の反復も避ける。
+ */
+const STEP_CHECK_VARIANTS = [
+  "お客様目線で見て迷わない",
+  "次に何をすればいいかわかる",
+  "実際にやってみて負担が大きすぎない",
+  "見た人が同じようにできそうだと感じる",
+  "今日から無理なく続けられそう",
+  "特別な準備をしなくても始められる",
+] as const;
+
+function stepChecklistItems(i: number): [string, string] {
+  return ["この内容を実践できている", STEP_CHECK_VARIANTS[i % STEP_CHECK_VARIANTS.length]!];
+}
+
 export function pickVariant(spec: HowtoSpec): HowtoVariant {
   if (spec.layoutVariant && (VARIANTS as readonly string[]).includes(spec.layoutVariant)) return spec.layoutVariant as HowtoVariant;
   return "steps";
@@ -119,21 +137,25 @@ function stepPanel(theme: Theme, spec: HowtoSpec, i: number, total: number, cur:
   const band = i % 2 === 1;
   const moduleNode = step.example
     ? exampleBox(theme, "具体例", step.example)
-    : miniChecklist(theme, "この手順の確認", [`${step.heading}ができている`, "お客様目線で見て迷わない"]);
+    : miniChecklist(theme, "この手順の確認", stepChecklistItems(i));
   return page(theme, "white", [
     header(theme, `STEP ${i + 1} / ${spec.slides.pages.length}`),
     el("div", {
-      display: "flex", flexDirection: "column", flexGrow: 1, justifyContent: "center", gap: SPACE.lg,
+      // 紫苑QA(v8)対応: space-betweenは本文と具体例の間に穴を作るため中央寄せへ。
+      // 見出し→本文→具体例を連続で積み、カード内の余白は上下に均等分配する
+      display: "flex", flexDirection: "column", flexGrow: 1, justifyContent: "center", gap: SPACE.xl,
       backgroundColor: band ? "#fff" : p.primarySoft, border: band ? `2px solid ${p.line}` : "none", borderRadius: 40, padding: SPACE.xxl, marginTop: SPACE.lg, marginBottom: SPACE.lg,
     }, [
-      el("div", { display: "flex", alignItems: "center", gap: SPACE.lg }, [
-        numberBadge(theme, i + 1, band ? 96 : 120),
-        el("div", { display: "flex", flexDirection: "column" }, [
-          el("div", { ...typeStyle("kicker"), color: p.primary }, `STEP ${i + 1}`),
-          el("div", { ...typeStyle("h1", { whiteSpace: "pre-wrap" }), color: p.primaryDark }, step.heading),
+      el("div", { display: "flex", flexDirection: "column", gap: SPACE.lg }, [
+        el("div", { display: "flex", alignItems: "center", gap: SPACE.lg }, [
+          numberBadge(theme, i + 1, band ? 96 : 120),
+          el("div", { display: "flex", flexDirection: "column" }, [
+            el("div", { ...typeStyle("kicker"), color: p.accent }, `STEP ${i + 1}`),
+            el("div", { ...typeStyle("h1", { whiteSpace: "pre-wrap" }), color: p.primaryDark }, step.heading),
+          ]),
         ]),
+        el("div", { ...typeStyle("lead", { whiteSpace: "pre-wrap" }), color: p.ink }, step.body),
       ]),
-      el("div", { ...typeStyle("lead", { whiteSpace: "pre-wrap" }), color: p.ink }, step.body),
       moduleNode,
     ]),
     footer(theme, total, cur),
@@ -151,8 +173,9 @@ function stepTimeline(theme: Theme, spec: HowtoSpec, i: number, total: number, c
         el("div", { flexGrow: 1, height: 10, borderRadius: 999, backgroundColor: k <= i ? p.primary : p.surfaceDark, display: "flex" }, ""),
       )),
       el("div", { display: "flex", backgroundColor: p.surfaceDark, borderRadius: 40, padding: SPACE.xxl }, [timelineStep(theme, i + 1, step.heading, step.body, true)]),
-      miniChecklist(theme, "確認点", [`${step.heading}ができている`, "スマホで見て読みやすい"]),
-    ], { gap: SPACE.lg, justify: "center" }),
+      miniChecklist(theme, "確認点", stepChecklistItems(i)),
+      // 紫苑QA(v8)対応: 3要素をspace-aroundで縦に分散し、上下の空白帯と巨大な空カードの両方を避ける
+    ], { gap: SPACE.lg, justify: "space-around" }),
     footer(theme, total, cur),
   ]);
 }
@@ -164,7 +187,7 @@ function summaryPage(theme: Theme, spec: HowtoSpec, variant: HowtoVariant, total
     header(theme, pillarKicker(spec.pillar)),
     body([
       barHeading(theme, "h2", title),
-      el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, spec.slides.pages.map((s) => checkItem(theme, s.heading, "ok"))),
+      el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, spec.slides.pages.map((s) => checkItem(theme, s.heading, "primary"))),
       el("div", { ...typeStyle("caption"), color: p.inkMuted }, "保存しておくと、順番に見返しながら整えられます。"),
     ], { gap: SPACE.lg, justify: "center" }),
     footer(theme, total, cur, { cta: "保存して見返す" }),

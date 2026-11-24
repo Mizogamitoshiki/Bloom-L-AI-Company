@@ -13,6 +13,7 @@ interface VariantEntry { variant: string; preview: PreviewMeta | null; qa: Varia
 interface Item {
   templateId: string; family: string; version: number | null; status: string; fingerprint: string; note: string | null;
   variants: VariantEntry[]; approvability: { ok: boolean; failures: { variant: string; reason: string }[] };
+  publishVersion: number | null;
   versionHistory: { version: number; status: string }[];
 }
 
@@ -122,6 +123,20 @@ export default function TemplatesPage(): JSX.Element {
                 <span style={{ fontSize: 12.5, fontWeight: 700, padding: "4px 12px", borderRadius: 999, background: it.status === "approved" ? "var(--color-success-soft)" : it.status === "rejected" ? "var(--color-danger-soft)" : "var(--color-surface-muted)", color: it.status === "approved" ? "var(--color-success)" : it.status === "rejected" ? "var(--color-danger)" : "var(--color-text-muted)" }}>{STATUS_LABEL[it.status] ?? it.status}</span>
               </div>
               <div className="card__body" style={{ display: "grid", gap: 12 }}>
+                {/* いま公開(書き出し)に使われる版を明示する(承認したのに未承認と言われる混乱の防止) */}
+                {it.version !== null && it.publishVersion !== null && it.publishVersion !== it.version ? (
+                  <p style={{ fontSize: 12.5, margin: 0, padding: "8px 12px", borderRadius: 8, background: "var(--color-surface-muted)", color: "var(--color-text)" }}>
+                    現在の投稿画像には承認済みの <strong>v{it.publishVersion}</strong> が使われています。この v{it.version} を承認すると、以後の投稿は v{it.version} で作られます。
+                  </p>
+                ) : it.version !== null && it.publishVersion === null ? (
+                  <p style={{ fontSize: 12.5, margin: 0, padding: "8px 12px", borderRadius: 8, background: "var(--color-danger-soft)", color: "var(--color-danger)" }}>
+                    公開に使える承認済みの版がありません。この v{it.version} が承認されるまで、このテンプレートの投稿は書き出しできません。
+                  </p>
+                ) : it.version !== null && it.publishVersion === it.version ? (
+                  <p style={{ fontSize: 12.5, margin: 0, padding: "8px 12px", borderRadius: 8, background: "var(--color-success-soft)", color: "var(--color-success)" }}>
+                    この v{it.version} が現在の公開(書き出し)に使われています。
+                  </p>
+                ) : null}
                 {/* variantタブ */}
                 <div role="tablist" aria-label={`${it.family} のvariant`} style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {it.variants.map((v) => (

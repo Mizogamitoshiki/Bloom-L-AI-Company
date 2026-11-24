@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type JSX, type ReactNode } from "react";
 import {
   IconHome,
+  IconUsers,
   IconStamp,
   IconExport,
   IconKanban,
@@ -11,11 +12,13 @@ import {
   IconMeeting,
   IconTemplate,
   IconChart,
+  IconSparkle,
   IconSettings,
   IconBell,
   IconQuestion,
   IconMenu,
   IconBuilding,
+  IconLayout,
 } from "./icons";
 import { PixelAvatar } from "./PixelAvatar";
 
@@ -27,11 +30,14 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { href: "/", label: "オフィス", Icon: IconHome },
+  { href: "/employees", label: "AI社員", Icon: IconUsers },
   { href: "/approvals", label: "承認", Icon: IconStamp },
   { href: "/publish", label: "公開準備", Icon: IconExport },
+  { href: "/stories", label: "ストーリー", Icon: IconSparkle },
   { href: "/pipeline", label: "投稿パイプライン", Icon: IconKanban },
   { href: "/calendar", label: "カレンダー", Icon: IconCalendar },
   { href: "/portfolio", label: "実績素材", Icon: IconImage },
+  { href: "/samples", label: "サイトサンプル", Icon: IconLayout },
   { href: "/reports", label: "日報", Icon: IconReport },
   { href: "/analytics", label: "成長分析", Icon: IconChart },
   { href: "/meetings", label: "会議", Icon: IconMeeting },

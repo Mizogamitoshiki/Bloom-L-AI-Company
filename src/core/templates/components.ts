@@ -6,7 +6,7 @@
  * チェック項目、強調数値(stat)、比較表、端末モック、引用/出典カード、タグ、アイコン。
  */
 import {
-  CANVAS, SAFE, SPACE, RADIUS, STROKE, TYPE, FONT,
+  CANVAS, SAFE, SPACE, RADIUS, STROKE, TYPE, FONT, CONTENT_WIDTH,
   LOGO_DISPLAY_WIDTH, type TypeToken, type TypeStyle, type Theme, type Palette,
 } from "./design-system";
 
@@ -395,7 +395,7 @@ export function comparisonRow(theme: Theme, left: string, right: string, opts: {
           ? { backgroundColor: side === "r" ? p.primary : p.surfaceDark, color: side === "r" ? "#fff" : p.inkMuted, fontWeight: 800, fontSize: TYPE.label.size }
           : { fontSize: TYPE.body.size, color: p.ink, fontWeight: side === "r" ? 700 : 400 }),
       },
-      header ? value : [side === "r" ? checkMark(p.ok, 34) : crossMark(p.inkMuted, 34), el("div", { display: "flex", flexGrow: 1, whiteSpace: "pre-wrap" }, value)],
+      header ? value : [side === "r" ? checkMark(p.primary, 34) : crossMark(p.inkMuted, 34), el("div", { display: "flex", flexGrow: 1, whiteSpace: "pre-wrap" }, value)],
     );
   return el(
     "div",
@@ -528,21 +528,26 @@ export function timelineStep(theme: Theme, n: number, heading: string, bodyText:
   ]);
 }
 
-/** Before→After の縦カード(矢印つき) */
-export function beforeAfterCard(theme: Theme, before: string, after: string): SatoriNode {
+/**
+ * Before→After の縦カード(矢印つき)。
+ * ラベルは呼び出し側が渡す(既定は「これまで」/「導入後」)。特定トピック固定の
+ * ラベルをここで決め打ちすると、HP導入以外のトピックで使う呼び出し元(例: tpl-compare)で
+ * 内容と無関係な文言になるため(V7再監査で発見)。
+ */
+export function beforeAfterCard(theme: Theme, before: string, after: string, labels: { before: string; after: string } = { before: "これまで", after: "導入後" }): SatoriNode {
   const p = theme.colors;
   const cell = (label: string, value: string, tone: "before" | "after"): SatoriNode =>
     el("div", { display: "flex", alignItems: "center", gap: SPACE.md, flexBasis: 0, flexGrow: 1, padding: `${SPACE.md}px ${SPACE.lg}px`, borderRadius: RADIUS.md, backgroundColor: tone === "after" ? p.primarySoft : p.surfaceDark }, [
-      tone === "after" ? iconCheck(p.ok, 40) : iconCross(p.inkMuted, 40),
+      tone === "after" ? iconCheck(p.primary, 40) : iconCross(p.inkMuted, 40),
       el("div", { display: "flex", flexDirection: "column" }, [
         el("div", { fontSize: 20, fontWeight: 700, color: p.inkMuted, display: "flex" }, label),
         el("div", { fontSize: 28, fontWeight: 700, color: tone === "after" ? p.primaryDark : p.ink, display: "flex", whiteSpace: "pre-wrap" }, value),
       ]),
     ]);
   return el("div", { display: "flex", alignItems: "center", gap: SPACE.sm, width: "100%" }, [
-    cell("これまで", before, "before"),
+    cell(labels.before, before, "before"),
     iconArrow(p.primary, 40),
-    cell("HP導入後", after, "after"),
+    cell(labels.after, after, "after"),
   ]);
 }
 
@@ -568,7 +573,7 @@ export function miniChecklist(theme: Theme, title: string, items: string[]): Sat
     [
       el("div", { ...typeStyle("label"), color: p.primaryDark }, title),
       ...items.map((it) =>
-        el("div", { display: "flex", alignItems: "center", gap: SPACE.sm }, [iconCheck(p.ok, 34), el("div", { fontSize: 26, fontWeight: 700, color: p.ink, display: "flex", flexGrow: 1, whiteSpace: "pre-wrap" }, it)]),
+        el("div", { display: "flex", alignItems: "center", gap: SPACE.sm }, [iconCheck(p.primary, 34), el("div", { fontSize: 26, fontWeight: 700, color: p.ink, display: "flex", flexGrow: 1, whiteSpace: "pre-wrap" }, it)]),
       ),
     ],
   );
@@ -599,7 +604,7 @@ export function impactList(theme: Theme, rows: { heading: string; text: string }
     rows.map((r) =>
       el("div", { display: "flex", gap: SPACE.md, alignItems: "flex-start", backgroundColor: p.surface, border: `2px solid ${p.line}`, borderRadius: RADIUS.md, padding: SPACE.lg }, [
         iconArrow(p.primary, 40),
-        el("div", { display: "flex", flexDirection: "column", gap: 4, flexGrow: 1 }, [
+        el("div", { display: "flex", flexDirection: "column", gap: 4, width: CONTENT_WIDTH - 40 - SPACE.md - SPACE.lg * 2 }, [
           el("div", { fontSize: 27, fontWeight: 800, color: p.primaryDark, display: "flex", whiteSpace: "pre-wrap" }, r.heading),
           el("div", { ...typeStyle("body", { whiteSpace: "pre-wrap" }), color: p.ink }, r.text),
         ]),

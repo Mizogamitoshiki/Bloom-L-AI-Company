@@ -76,10 +76,11 @@ export interface Palette extends BrandColors {
 export function palette(c: BrandColors): Palette {
   return {
     ...c,
-    primarySoft: "#eaf1fc",
-    line: "#d7e0ee",
+    // 2026-07-27 V8/D-18: 濃紺×ゴールド系に調和させた派生色。
+    primarySoft: "#eef1f7", // 濃紺の極薄ティント(帯・カード背景)
+    line: "#d7deea", // 罫線
     onPrimary: "#ffffff",
-    accentSoft: "#fbedd6",
+    accentSoft: "#f5ecd6", // 薄いゴールド
     ok: "#157a41",
     warn: "#b5730a",
     danger: "#c62f2f",

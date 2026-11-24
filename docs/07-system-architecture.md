@@ -54,7 +54,7 @@ graph TD
     end
     subgraph agents[".claude/(エージェント定義)"]
         SK[skills: kickoff 等]
-        AG[agents: 社員9名の定義]
+        AG[agents: 社員13名の定義(2026-07-17拡張)]
     end
     app --> core
     tools --> core

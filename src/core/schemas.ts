@@ -280,20 +280,166 @@ export const compareSpecSchema = z
   .object({ ...specBase, templateId: z.literal("tpl-compare"), slides: compareSlidesSchema })
   .strict();
 
+// ---- V10: サイトサンプル(docs/32) ----
+
+export const PLAN_IDS = ["ume", "take", "matsu"] as const;
+export type PlanId = (typeof PLAN_IDS)[number];
+export const SAMPLE_PERSONAS = ["P1", "P2", "P3"] as const;
+/** 代表者が投入する素材の種別。design=忠実再現の対象、reference=雰囲気の参考(画面に出さない) */
+export const SAMPLE_ASSET_KINDS = ["design", "hero", "logo", "photo", "reference"] as const;
+export type SampleAssetKind = (typeof SAMPLE_ASSET_KINDS)[number];
+export const SAMPLE_REQUEST_STATUSES = ["new", "building", "qa", "ready", "posted", "declined"] as const;
+export type SampleRequestStatus = (typeof SAMPLE_REQUEST_STATUSES)[number];
+export const SAMPLE_SCREENSHOT_NAMES = ["pc-fold", "pc-full", "sp-fold", "sp-full"] as const;
+export type SampleScreenshotName = (typeof SAMPLE_SCREENSHOT_NAMES)[number];
+
+/** 代表者のサンプル依頼(intake)。attest=素材の権利宣言(必須・falseは受け付けない) */
+export const sampleRequestInputSchema = z
+  .object({
+    slug: z.string().regex(/^[a-z0-9][a-z0-9-]{2,39}$/, "slugは英小文字・数字・ハイフン(3〜40字)"),
+    siteTitle: z.string().max(40).optional(),
+    industry: z.string().min(1).max(80),
+    persona: z.enum(SAMPLE_PERSONAS),
+    planTarget: z.enum([...PLAN_IDS, "auto"]).default("auto"),
+    pages: z.array(z.string().min(1).max(20)).min(1).max(3).default(["TOP"]),
+    brief: z.string().max(1000).default(""),
+    attest: z.literal(true, {
+      errorMap: () => ({ message: "素材の権利宣言(attest=true)が必要です。自分が権利を持つデザイン・素材のみ投入できます" }),
+    }),
+  })
+  .strict();
+export type SampleRequestInput = z.infer<typeof sampleRequestInputSchema>;
+
+export const sampleAssetInputSchema = z
+  .object({
+    fileName: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}\.(png|jpg|jpeg|webp)$/i, "素材ファイル名は英数字とpng/jpg/webpのみ"),
+    kind: z.enum(SAMPLE_ASSET_KINDS),
+  })
+  .strict();
+export type SampleAssetInput = z.infer<typeof sampleAssetInputSchema>;
+
+export const SITE_SAMPLE_LIMITS = { maxHtmlChars: 200_000, maxCssChars: 100_000, maxPages: 3, maxAssets: 10 } as const;
+
+/**
+ * 颯(Web制作担当)の成果物: サンプルサイトのHTML/CSS(V10)。
+ * ファイル書込・撮影は通常コード(sample-build)が行う。外部URL/JS/実在情報/価格は通常コードが検査して拒否する。
+ */
+export const siteSampleArtifactSchema = z
+  .object({
+    kind: z.literal("site_sample"),
+    requestId: z.string().min(1).max(40),
+    siteTitle: z.string().min(1).max(40),
+    concept: z.string().min(1).max(120),
+    pages: z
+      .array(
+        z
+          .object({
+            path: z.string().regex(/^[a-z0-9-]+\.html$/, "ページ名は英小文字・数字・ハイフン+.html"),
+            title: z.string().min(1).max(80),
+            html: z.string().min(1).max(SITE_SAMPLE_LIMITS.maxHtmlChars),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(SITE_SAMPLE_LIMITS.maxPages),
+    css: z.string().max(SITE_SAMPLE_LIMITS.maxCssChars),
+    assetsUsed: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/)).max(SITE_SAMPLE_LIMITS.maxAssets).default([]),
+    planFit: z.enum(PLAN_IDS),
+    planFitReason: z.string().min(1).max(200),
+    notes: z.array(z.string().max(200)).max(10).default([]),
+  })
+  .strict()
+  .refine((s) => s.pages.some((p) => p.path === "index.html"), { message: "index.html が必要です" })
+  .refine((s) => new Set(s.pages.map((p) => p.path)).size === s.pages.length, { message: "ページ名が重複しています" });
+export type SiteSampleArtifact = z.infer<typeof siteSampleArtifactSchema>;
+
+/** tpl-sample: 表紙→場面→画面(SP)→画面(PC)→制作の裏側→プラン提案(価格帯は通常コード注入)→CTA */
+export const sampleSlidesSchema = z
+  .object({
+    cover: coverSchema,
+    scene: headingBody,
+    screens: z.array(z.object({ caption: z.string().min(2).max(40) }).strict()).length(2),
+    behind: headingBody,
+    /** 価格はAIが書かない。planIdから通常コードが承認済み価格帯を注入する */
+    plan: z.object({ planId: z.enum(PLAN_IDS), note: z.string().min(4).max(60) }).strict(),
+    ctaMessage: z.string().min(4).max(60),
+  })
+  .strict();
+
+export const sampleCopyArtifactSchema = z
+  .object({
+    kind: z.literal("sample_copy"),
+    headline: z.string().min(4).max(40),
+    body: z.string().min(10).max(1800),
+    cta: z.string().min(4).max(120),
+    hashtags: z.array(z.string().regex(/^#\S+$/).max(40)).min(5).max(15),
+    slides: sampleSlidesSchema,
+  })
+  .strict();
+export type SampleCopy = z.infer<typeof sampleCopyArtifactSchema>;
+
+export const sampleScreenshotRefSchema = z
+  .object({
+    name: z.enum(SAMPLE_SCREENSHOT_NAMES),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    width: z.number().int().min(100).max(12_000),
+    height: z.number().int().min(100).max(40_000),
+    safeRelativePath: z.string().min(1).max(300),
+  })
+  .strict();
+export type SampleScreenshotRef = z.infer<typeof sampleScreenshotRefSchema>;
+
+/** 承認済み価格帯(config/pricing.yaml)。通常コードがplanIdから注入する。AIは書かない */
+export const priceBandSchema = z
+  .object({
+    planId: z.enum(PLAN_IDS),
+    label: z.string().min(1).max(20),
+    build: z.string().min(1).max(30),
+    maintenance: z.string().min(1).max(30),
+    disclaimer: z.string().min(1).max(120),
+  })
+  .strict();
+export type PriceBand = z.infer<typeof priceBandSchema>;
+
+export const sampleSpecSchema = z
+  .object({
+    ...specBase,
+    templateId: z.literal("tpl-sample"),
+    slides: sampleSlidesSchema,
+    sampleId: z.string().min(1).max(40),
+    sampleTitle: z.string().min(1).max(48),
+    screenshots: z.object({ pcFold: sampleScreenshotRefSchema, spFold: sampleScreenshotRefSchema }).strict(),
+    priceBand: priceBandSchema,
+  })
+  .strict();
+
 export const carouselSpecSchema = z.discriminatedUnion("templateId", [
   howtoSpecSchema,
   newsSpecSchema,
   portfolioSpecSchema,
   compareSpecSchema,
+  sampleSpecSchema,
 ]);
 export type CarouselSpec = z.infer<typeof carouselSpecSchema>;
 export type HowtoSpec = z.infer<typeof howtoSpecSchema>;
 export type NewsSpec = z.infer<typeof newsSpecSchema>;
 export type PortfolioSpec = z.infer<typeof portfolioSpecSchema>;
 export type CompareSpec = z.infer<typeof compareSpecSchema>;
+export type SampleSpec = z.infer<typeof sampleSpecSchema>;
 
-export const TEMPLATE_IDS = ["tpl-howto", "tpl-news", "tpl-portfolio", "tpl-compare"] as const;
+export const TEMPLATE_IDS = ["tpl-howto", "tpl-news", "tpl-portfolio", "tpl-compare", "tpl-sample"] as const;
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
+
+/** config/pricing.yaml(owner専用)。ここにある文字列だけが投稿に出てよい価格表記 */
+const pricingBandSchema = z.object({ label: z.string().min(1).max(20), build: z.string().min(1).max(30), maintenance: z.string().min(1).max(30) }).strict();
+export const pricingSchema = z
+  .object({
+    approved_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    approved_public_price_bands: z.object({ ume: pricingBandSchema, take: pricingBandSchema, matsu: pricingBandSchema }).strict(),
+    disclaimer: z.string().min(1).max(120),
+  })
+  .strict();
+export type Pricing = z.infer<typeof pricingSchema>;
 
 /** レンダリング画像成果物のメタデータ(artifacts.content_json、kind="image") */
 export const imageMetaSchema = z
@@ -446,8 +592,13 @@ export const visualQaArtifactSchema = z
     pageFindings: z
       .array(z.object({ page: z.number().int().min(1), severity: z.enum(["critical", "minor"]), finding: z.string().min(1).max(300) }).strict())
       .max(50),
+    /** V10: サンプルサイトの撮影画面QA(紬)でのみ使用。元デザイン画像との忠実度(lowはfailと両立しない) */
+    fidelity: z.enum(["high", "medium", "low"]).optional(),
   })
   .strict()
+  .refine((v) => (v.result === "pass" ? v.fidelity !== "low" : true), {
+    message: "忠実度lowの状態ではresult=passにできません(元デザインの再現をやり直してください)",
+  })
   .refine((v) => (v.result === "pass" ? v.criticalIssues.length === 0 : true), {
     message: "criticalIssuesがある場合はresult=passにできません(fail closed)",
   })
@@ -464,6 +615,8 @@ export const artifactContentSchema = z.union([
   newsCopyArtifactSchema,
   portfolioCopyArtifactSchema,
   compareCopyArtifactSchema,
+  sampleCopyArtifactSchema,
+  siteSampleArtifactSchema,
   carouselSpecSchema,
   qaReportArtifactSchema,
   reportArtifactSchema,
@@ -478,6 +631,8 @@ export const ARTIFACT_KINDS = [
   "news_copy",
   "portfolio_copy",
   "compare_copy",
+  "sample_copy",
+  "site_sample",
   "carousel_spec",
   "qa_report",
   "report",
@@ -659,22 +814,54 @@ export type BusinessOutcomeInput = z.infer<typeof businessOutcomeInputSchema>;
 
 export const modelProfileSchema = z.enum(MODEL_PROFILES);
 
-/** limits.yaml の構造(docs/14) */
-export const limitsSchema = z.object({
-  daily: z.object({
-    max_generated_posts: z.number().int().positive(),
-    max_tasks: z.number().int().positive(),
-    max_heavy_escalations: z.number().int().positive(),
-    max_research_fetches: z.number().int().positive(),
-    max_est_output_chars: z.number().int().positive(),
-    max_agent_launches: z.number().int().positive(),
-  }),
-  retry: z.object({
-    per_task: z.number().int().min(0).max(5),
-    replan_days: z.number().int().min(0),
-  }),
-  approval_queue: z.object({ soft_cap: z.number().int().positive() }),
-  stale: z.object({ heartbeat_minutes: z.number().int().positive() }),
-  api: z.object({ monthly_budget_yen: z.number().int().min(0) }),
-});
+/**
+ * limits.yaml の構造(docs/14)。
+ * daily配下は互いに独立ではない(例: max_tasksが小さいとmax_agent_launchesに達する前に
+ * 「日次タスク上限」で先に停止し、意図と異なるエラーになる)。superRefineで相互整合性を検査する
+ * (改善#4: max_tasks(32) < max_agent_launches(40)によりテストが誤った上限で失敗した実例の再発防止)。
+ */
+export const limitsSchema = z
+  .object({
+    daily: z.object({
+      max_generated_posts: z.number().int().positive(),
+      max_tasks: z.number().int().positive(),
+      max_heavy_escalations: z.number().int().positive(),
+      max_research_fetches: z.number().int().positive(),
+      max_est_output_chars: z.number().int().positive(),
+      max_agent_launches: z.number().int().positive(),
+      /** V10: 1日のサンプルサイト制作上限(ビルド=撮影を伴う重い工程。既定1) */
+      max_site_samples: z.number().int().positive().default(1),
+    }),
+    retry: z.object({
+      per_task: z.number().int().min(0).max(5),
+      replan_days: z.number().int().min(0),
+    }),
+    approval_queue: z.object({ soft_cap: z.number().int().positive() }),
+    stale: z.object({ heartbeat_minutes: z.number().int().positive() }),
+    api: z.object({ monthly_budget_yen: z.number().int().min(0) }),
+  })
+  .superRefine((limits, ctx) => {
+    const { max_tasks, max_agent_launches, max_generated_posts } = limits.daily;
+    if (max_tasks <= max_agent_launches) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["daily", "max_tasks"],
+        message: `max_tasks(${max_tasks})はmax_agent_launches(${max_agent_launches})より大きくなければなりません。タスク起動より先に「日次タスク上限」で停止してしまいます`,
+      });
+    }
+    if (max_generated_posts > max_tasks) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["daily", "max_generated_posts"],
+        message: `max_generated_posts(${max_generated_posts})はmax_tasks(${max_tasks})以下でなければなりません(投稿1本につき企画・コピー等で複数タスクが必要)`,
+      });
+    }
+    if (limits.approval_queue.soft_cap > max_generated_posts * 20) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["approval_queue", "soft_cap"],
+        message: `approval_queue.soft_cap(${limits.approval_queue.soft_cap})が極端に大きく、max_generated_posts(${max_generated_posts})との整合が取れていない可能性があります`,
+      });
+    }
+  });
 export type Limits = z.infer<typeof limitsSchema>;

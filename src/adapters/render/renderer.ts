@@ -112,6 +112,14 @@ export async function renderCarousel(
       throw new Error("実績画像のhashがspecと一致しません(差し替えまたは不正な素材)");
     }
   }
+  // V10 tpl-sample: 撮影画像のhashをspecと照合(差し替え・不正素材の拒否)
+  if (spec.templateId === "tpl-sample") {
+    const shots = opts.assets?.sampleShots;
+    if (!shots) throw new Error("サンプルの撮影画像がレンダラーへ安全に引き渡されていません");
+    if (shots.pcFold.sha256 !== spec.screenshots.pcFold.sha256 || shots.spFold.sha256 !== spec.screenshots.spFold.sha256) {
+      throw new Error("サンプル撮影画像のhashがspecと一致しません(差し替えまたは不正な素材)");
+    }
+  }
   const pages = template.buildPages(spec, theme, variant, opts.assets);
   if (pages.length !== template.expectedPages(spec)) {
     throw new Error(`ページ数が期待値と不一致: ${pages.length} / ${template.expectedPages(spec)}`);
@@ -152,6 +160,10 @@ export async function renderCarousel(
     fingerprint,
     ...(spec.templateId === "tpl-portfolio" && spec.portfolioMedia.mode === "real_screenshot"
       ? { embeddedAssetSha256: spec.portfolioMedia.assetSha256 }
+      : {}),
+    // V10: tpl-sampleは2枚(PC/SP)のhashを連結して刻印する
+    ...(spec.templateId === "tpl-sample"
+      ? { embeddedAssetSha256: `${opts.assets!.sampleShots!.pcFold.sha256}:${opts.assets!.sampleShots!.spFold.sha256}` }
       : {}),
   };
 }

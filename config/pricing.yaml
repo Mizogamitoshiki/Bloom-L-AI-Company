@@ -1,0 +1,19 @@
+# 承認済み価格帯(SNS公開可)。2026-07-28 代表者承認(DECISIONS.md D-18追記)。2026-08-28 代表者指示で全て税別「+tax」表記に統一。
+# ここにある文字列(build/maintenance)だけが投稿に出てよい価格表記。AI社員は価格を書かず、
+# 通常コードがplanIdからこの表記を注入し、これ以外の「円」表記はQAで機械的に拒否する(docs/32 §8)。
+# 編集は代表者のみ(CLI・AIからは変更しない)。確定価格・値引き・納期の公開は別途の代表者決定が必要。
+approved_on: "2026-08-28"
+approved_public_price_bands:
+  ume:
+    label: "梅プラン"
+    build: "45,000円〜 +tax"
+    maintenance: "月7,000円〜 +tax"
+  take:
+    label: "竹プラン"
+    build: "120,000円〜 +tax"
+    maintenance: "月12,000円〜 +tax"
+  matsu:
+    label: "松プラン"
+    build: "500,000円〜 +tax"
+    maintenance: "応相談"
+disclaimer: "価格は税別(+tax)の目安です。内容により個別にお見積もりします。"

@@ -6,7 +6,8 @@
  */
 import sharp from "sharp";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { CarouselSpec, DesignQaResult } from "../../core/schemas";
 import { CANVAS } from "../../core/templates/design-system";
 import { templateFor } from "../../core/templates/index";
@@ -35,9 +36,10 @@ export async function runDesignQa(spec: CarouselSpec, render: RenderInfo, theme:
   const tpl = templateFor(spec.templateId);
   const expected = tpl.expectedPages(spec);
 
-  // 1. ページ数(表紙+本文+CTAで5〜7枚)
-  const inRange = render.pageCount >= 5 && render.pageCount <= 7;
-  checks.push({ id: "page-count", ok: render.pageCount === expected && inRange, detail: `${render.pageCount}枚(期待${expected}・目標5〜7)` });
+  // 1. ページ数(表紙+本文+CTAで6〜9枚。tpl-howtoはslides.pagesが3〜6件のため最大9枚になる。
+  // 以前は5〜7を上限としていたが、6ステップのhowto投稿(8〜9枚)を誤ってfailにする実バグがあったため是正)
+  const inRange = render.pageCount >= 6 && render.pageCount <= 9;
+  checks.push({ id: "page-count", ok: render.pageCount === expected && inRange, detail: `${render.pageCount}枚(期待${expected}・目標6〜9)` });
 
   // 2. 画像の連番と実在
   let filesOk = render.files.length === render.pageCount;
@@ -81,6 +83,22 @@ export async function runDesignQa(spec: CarouselSpec, render: RenderInfo, theme:
   const variantOk = tpl.variants.includes(render.variant);
   checks.push({ id: "variant", ok: variantOk, detail: variantOk ? `variant=${render.variant}` : `未登録variant=${render.variant}` });
 
+  // 7b. ページ重複検出(改善#5): 異なるページが同一バイト列で出力されるのは、
+  // buildPagesの索引バグやテンプレート分岐漏れの兆候。全ページ間でSHA-256を比較する。
+  const hashes = render.files.filter(existsSync).map((f) => ({ file: path.basename(f), hash: createHash("sha256").update(readFileSync(f)).digest("hex") }));
+  const seen = new Map<string, string>();
+  const dupes: string[] = [];
+  for (const { file, hash } of hashes) {
+    const prior = seen.get(hash);
+    if (prior) dupes.push(`${prior}==${file}`);
+    else seen.set(hash, file);
+  }
+  checks.push({
+    id: "no-duplicate-pages",
+    ok: dupes.length === 0,
+    detail: dupes.length === 0 ? "全ページが相異なる内容" : `内容が同一のページ組: ${dupes.join(", ")}`,
+  });
+
   // 7. portfolio showcaseは許可済み実画像を必須とし、specと実際に埋め込んだ素材hashを照合する
   if (spec.templateId === "tpl-portfolio") {
     const media = spec.portfolioMedia;
@@ -94,6 +112,17 @@ export async function runDesignQa(spec: CarouselSpec, render: RenderInfo, theme:
       detail: mediaOk
         ? (isReal ? `許可済み実画像hash一致(${media.assetSha256.slice(0, 12)}…)` : "story abstract(実画像未使用)")
         : "showcaseの実画像が未設定、または埋め込み素材hashがspecと不一致",
+    });
+  }
+
+  // 8. V10 tpl-sample: 埋め込んだ撮影画像(PC/SP)のhashがspecと一致すること
+  if (spec.templateId === "tpl-sample") {
+    const expected = `${spec.screenshots.pcFold.sha256}:${spec.screenshots.spFold.sha256}`;
+    const ok = render.embeddedAssetSha256 === expected;
+    checks.push({
+      id: "sample-media",
+      ok,
+      detail: ok ? `撮影画像hash一致(pc ${spec.screenshots.pcFold.sha256.slice(0, 12)}… / sp ${spec.screenshots.spFold.sha256.slice(0, 12)}…)` : "埋め込んだ撮影画像のhashがspecと不一致",
     });
   }
 

@@ -8,8 +8,8 @@ import type { NewsSpec } from "../schemas";
 import { CONTENT_WIDTH, SPACE, RADIUS, type Theme } from "./design-system";
 import {
   page, header, footer, body, tag, barHeading, quoteCard, sourceCard, contentsCard,
-  screenMock, swipeHint, changeFlow, impactList, actionList, splitTwo, miniChecklist,
-  numberBadge, text, slot, el, typeStyle, pg, type RenderedPage, type SlotText,
+  screenMock, swipeHint, changeFlow, impactList, splitTwo, miniChecklist,
+  numberBadge, text, slot, el, typeStyle, pg, type SatoriNode, type RenderedPage, type SlotText,
 } from "./components";
 import { pillarKicker } from "./family-util";
 import { ctaPage } from "./tpl-howto";
@@ -18,6 +18,17 @@ export const VARIANTS = ["report", "insight"] as const;
 export type NewsVariant = (typeof VARIANTS)[number];
 
 const WIDE = CONTENT_WIDTH - 64 - SPACE.md - SPACE.lg; // カード内の広い本文幅 ≈ 816
+
+/**
+ * 紫苑QA(v10)対応: space-aroundは「要素間=端の2倍」の余白になり空白が中間に集中する。
+ * Satoriはspace-evenly未対応のため、flexGrowスペーサーで上・間・下を厳密に均等化する。
+ */
+function evenSpread(children: SatoriNode[]): SatoriNode {
+  const spacer = (): SatoriNode => el("div", { flexGrow: 1, display: "flex" }, "");
+  const out: SatoriNode[] = [spacer()];
+  for (const c of children) out.push(c, spacer());
+  return el("div", { display: "flex", flexDirection: "column", flexGrow: 1, width: "100%" }, out);
+}
 
 export function pickVariant(spec: NewsSpec): NewsVariant {
   if (spec.layoutVariant && (VARIANTS as readonly string[]).includes(spec.layoutVariant)) return spec.layoutVariant as NewsVariant;
@@ -59,9 +70,12 @@ function sourcesPage(spec: NewsSpec, theme: Theme, cur: number): RenderedPage {
     header(theme, "出典"),
     body([
       barHeading(theme, "h2", "情報の出どころ"),
-      el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, spec.sourceRefs.map((r) => sourceCard(theme, r.publisher, r.title, r.publishedAt))),
-      el("div", { ...typeStyle("caption"), color: p.inkMuted }, "確認日時点の情報です。最新の状況は各出典をご確認ください。"),
-    ], { gap: SPACE.lg, justify: "center" }),
+      // 紫苑QA(v11)対応: 出典カードもサブ列にせず直接均等配置(カード間だけ狭くなる問題の修正)
+      evenSpread([
+        ...spec.sourceRefs.map((r) => sourceCard(theme, r.publisher, r.title, r.publishedAt)),
+        el("div", { ...typeStyle("caption"), color: p.inkMuted }, "確認日時点の情報です。最新の状況は各出典をご確認ください。"),
+      ]),
+    ], { gap: SPACE.lg, justify: "flex-start" }),
     footer(theme, 6, cur),
   ]));
 }
@@ -79,7 +93,7 @@ function buildReport(spec: NewsSpec, theme: Theme): RenderedPage[] {
           text("h1", spec.slides.cover.title, { color: p.ink }),
           text("lead", spec.slides.cover.subtitle, { color: p.inkMuted }),
         ]),
-        contentsCard(theme, "この投稿の構成", ["確認できた事実", "事実・変化・影響", "泉州への影響と対応", "出典"]),
+        contentsCard(theme, "この投稿の構成", ["確認できた事実", "事実・変化・影響", "泉州の事業者さまへの影響", "出典"]),
         swipeHint(theme, 6),
       ], { gap: SPACE.lg, justify: "space-between" }),
       footer(theme, 6, 0, { cta: "プロフィールへ" }),
@@ -88,34 +102,43 @@ function buildReport(spec: NewsSpec, theme: Theme): RenderedPage[] {
       header(theme, "確認できた事実"),
       body([
         barHeading(theme, "h2", "いま起きていること"),
-        el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, spec.slides.facts.map((f, i) =>
+        // 紫苑QA(v10)対応: 上・間・下の余白を厳密に均等化(evenSpread)
+        evenSpread(spec.slides.facts.map((f, i) =>
           el("div", { display: "flex", gap: SPACE.md, alignItems: "flex-start", backgroundColor: p.surface, border: `2px solid ${p.line}`, borderRadius: 20, padding: SPACE.lg }, [
             numberBadge(theme, i + 1, 64),
             el("div", { ...typeStyle("body", { whiteSpace: "pre-wrap" }), color: p.ink, width: WIDE }, f.text),
           ]),
         )),
-      ], { gap: SPACE.lg, justify: "center" }),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 1),
     ])),
     pg("news-change-flow", page(theme, "soft", [
       header(theme, "事実・変化・影響"),
       body([
         barHeading(theme, "h2", "何がどう変わるか"),
-        changeFlow(theme, [
-          { label: "事実", text: spec.slides.cover.title },
-          { label: "変化", text: spec.slides.opinion.heading },
-          { label: "影響", text: spec.slides.impact.heading },
+        // 紫苑QA(v10)対応: 上・間・下の余白を厳密に均等化(evenSpread)
+        evenSpread([
+          changeFlow(theme, [
+            { label: "事実", text: spec.slides.cover.title },
+            { label: "変化", text: spec.slides.opinion.heading },
+            { label: "影響", text: spec.slides.impact.heading },
+          ]),
+          quoteCard(theme, spec.slides.opinion.heading, spec.slides.opinion.body, "accent"),
         ]),
-        quoteCard(theme, spec.slides.opinion.heading, spec.slides.opinion.body, "accent"),
-      ], { gap: SPACE.lg, justify: "center" }),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 2),
     ])),
     pg("news-impact-today", page(theme, "white", [
       header(theme, "泉州の事業者さまへの影響"),
       body([
-        impactList(theme, [{ heading: spec.slides.impact.heading, text: spec.slides.impact.body }]),
-        miniChecklist(theme, "今できること", ["掲載情報を項目ごとに整理する", "問い合わせ導線をわかりやすくする"]),
-      ], { gap: SPACE.xl, justify: "center" }),
+        barHeading(theme, "h2", "影響をどう読むか"),
+        // 紫苑QA(v11)対応: 上・間・下を厳密均等化(evenSpread)
+        // V9(2026-08-10 QA指摘): copyに存在しない汎用actionListの注入を廃止。copy由来のimpact+事実/見解分離の注記で構成
+        evenSpread([
+          impactList(theme, [{ heading: spec.slides.impact.heading, text: spec.slides.impact.body }]),
+          quoteCard(theme, "事実と見解を分けて読む", "このページにはBloom-Lの推測・見解が含まれます。数値・事実は出典の調査結果をご確認ください。", "primary"),
+        ]),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 3),
     ])),
     sourcesPage(spec, theme, 4),
@@ -148,15 +171,18 @@ function buildInsight(spec: NewsSpec, theme: Theme): RenderedPage[] {
     pg("news-screen-observe", page(theme, "soft", [
       header(theme, "観測: 何が起きているか"),
       body([
-        screenMock(theme, "検索結果(イメージ)", [
-          { label: "AIの要約回答が上部に表示", strong: true },
-          { label: "従来の青リンクは下へ" },
+        // 紫苑QA(v10)対応: 上・間・下の余白を厳密に均等化(evenSpread)
+        evenSpread([
+          screenMock(theme, "検索結果(イメージ)", [
+            { label: "AIの要約回答が上部に表示", strong: true },
+            { label: "従来の青リンクは下へ" },
+          ]),
+          el("div", { display: "flex", gap: SPACE.md, alignItems: "flex-start", backgroundColor: "#fff", border: `2px solid ${p.line}`, borderRadius: 20, padding: SPACE.lg }, [
+            numberBadge(theme, 1, 56),
+            el("div", { ...typeStyle("body", { whiteSpace: "pre-wrap" }), color: p.ink, width: WIDE }, spec.slides.facts[0]!.text),
+          ]),
         ]),
-        el("div", { display: "flex", gap: SPACE.md, alignItems: "flex-start", backgroundColor: "#fff", border: `2px solid ${p.line}`, borderRadius: 20, padding: SPACE.lg }, [
-          numberBadge(theme, 1, 56),
-          el("div", { ...typeStyle("body", { whiteSpace: "pre-wrap" }), color: p.ink, width: WIDE }, spec.slides.facts[0]!.text),
-        ]),
-      ], { gap: SPACE.lg, justify: "center" }),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 1),
     ])),
     pg("news-fact-opinion", page(theme, "white", [
@@ -172,24 +198,32 @@ function buildInsight(spec: NewsSpec, theme: Theme): RenderedPage[] {
       footer(theme, 6, 2),
     ])),
     pg("news-impact-action", page(theme, "soft", [
-      header(theme, "影響 と 今できること"),
+      header(theme, "泉州の事業者さまへの影響"),
       body([
-        impactList(theme, [{ heading: spec.slides.impact.heading, text: spec.slides.impact.body }]),
-        actionList(theme, ["掲載情報を構造的に整理する", "問い合わせ導線を確認する", "実績・サービスを最新化する"]),
-      ], { gap: SPACE.xl, justify: "center" }),
+        barHeading(theme, "h2", "影響をどう読むか"),
+        // 紫苑QA(v11)対応: 上・間・下を厳密均等化(evenSpread)
+        // V9(2026-08-10 QA指摘): copyに存在しない汎用actionListの注入を廃止。copy由来のimpact+事実/見解分離の注記で構成
+        evenSpread([
+          impactList(theme, [{ heading: spec.slides.impact.heading, text: spec.slides.impact.body }]),
+          quoteCard(theme, "事実と見解を分けて読む", "このページにはBloom-Lの推測・見解が含まれます。数値・事実は出典の調査結果をご確認ください。", "primary"),
+        ]),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 3),
     ])),
     pg("news-judgment", page(theme, "white", [
       header(theme, "自社は大丈夫? 判断チェック"),
       body([
         barHeading(theme, "h2", "当てはまるほど、対応の余地"),
-        miniChecklist(theme, "チェック項目", [
-          "検索しても自社情報が出てこない",
-          "営業時間や場所が探しにくい",
-          "問い合わせ手段がわかりにくい",
+        // 紫苑QA(v10)対応: 上・間・下の余白を厳密に均等化(evenSpread)
+        evenSpread([
+          miniChecklist(theme, "チェック項目", [
+            "検索しても自社情報が出てこない",
+            "営業時間や場所が探しにくい",
+            "問い合わせ手段がわかりにくい",
+          ]),
+          el("div", { ...typeStyle("caption"), color: p.inkMuted }, "架空データによるデモです。実際の判断は各出典と自社状況でご確認ください。"),
         ]),
-        el("div", { ...typeStyle("caption"), color: p.inkMuted }, "架空データによるデモです。実際の判断は各出典と自社状況でご確認ください。"),
-      ], { gap: SPACE.lg, justify: "center" }),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 4),
     ])),
     pg("cta", ctaPage(theme, spec.slides.ctaMessage, { badge: "プロフィールへ", sub: "リンクから詳しく見られます" }, 6, 5)),

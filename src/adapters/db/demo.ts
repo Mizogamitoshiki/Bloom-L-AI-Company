@@ -185,8 +185,6 @@ export function seedDemo(db: Db): void {
   insertEvent(db, renTask, 3, "started", 200);
   insertEvent(db, renTask, 4, "succeeded", 180);
 
-  // 陽葵: タスクなし(待機) — DM支援は第2段階のためMVPでは常時待機
-
   setSetting(db, "demo_mode", true);
   audit(db, "demo", "seed_demo", "settings", "demo_mode", { note: "架空のデモデータを投入" });
   db.update(t.settings).set({ valueJson: "true" }).where(eq(t.settings.key, "demo_mode")).run();

@@ -97,6 +97,39 @@ export default function PublishPage(): JSX.Element {
     }
   }
 
+  /** 公開結果不明(needs_reconciliation)の解消。代表者がInstagramアプリで確認した結果を記録する */
+  async function reconcile(postId: string, outcome: "not_published" | "published"): Promise<void> {
+    let instagramMediaId: string | undefined;
+    if (outcome === "not_published") {
+      if (!window.confirm("Instagramアプリを確認し、この投稿が公開されて【いない】ことを確認しましたか？\n記録すると再実行できるようになります。")) return;
+    } else {
+      const typed = window.prompt("Instagramに公開されていた場合、そのメディアID(数字)を入力してください。\n(Meta Business Suite等で確認できます)");
+      if (typed === null) return;
+      if (!/^\d+$/.test(typed.trim())) {
+        setError("メディアIDは数字で入力してください");
+        return;
+      }
+      instagramMediaId = typed.trim();
+    }
+    setBusy(postId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/posts/${postId}/instagram-reconcile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-bloom-owner-action": "confirmed-in-ui" },
+        body: JSON.stringify(outcome === "published" ? { outcome, instagramMediaId } : { outcome }),
+      });
+      const json: unknown = await res.json();
+      if (!res.ok) throw new Error((json as { error?: string }).error ?? "操作に失敗しました");
+      setNotice(outcome === "not_published" ? "未投稿を確認として記録しました。もう一度公開を実行できます。" : "投稿済みとして記録しました。");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function instagramAct(postId: string, postTitle: string): Promise<void> {
     if (!instagram || instagram.mode === "disabled") return;
     const isLive = instagram.mode === "live";
@@ -317,10 +350,23 @@ export default function PublishPage(): JSX.Element {
                     {" — Instagramにはまだ投稿されていません"}
                   </p>
                   {it.instagramJob && ["publishing", "needs_reconciliation"].includes(it.instagramJob.status) ? (
-                    <div className="error-box" role="alert">
-                      <strong>実投稿結果の確認が必要です。</strong>{" "}
-                      Instagramアプリで同じ投稿が公開されていないか確認してください。二重投稿防止のため、この投稿は自動再送されません。
-                      <br />ジョブID: <code>{it.instagramJob.id}</code>
+                    <div className="error-box" role="alert" style={{ display: "grid", gap: 8 }}>
+                      <span>
+                        <strong>実投稿結果の確認が必要です。</strong>{" "}
+                        Instagramアプリで同じ投稿が公開されていないか確認してください。二重投稿防止のため、この投稿は自動再送されません。
+                        <br />ジョブID: <code>{it.instagramJob.id}</code>
+                        {it.instagramJob.errorMessage ? <><br />エラー: {it.instagramJob.errorMessage}</> : null}
+                      </span>
+                      {it.instagramJob.status === "needs_reconciliation" ? (
+                        <span style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button type="button" className="btn btn--secondary btn--sm" disabled={busy === it.id} onClick={() => void reconcile(it.id, "not_published")}>
+                            投稿されていなかった(再実行を許可)
+                          </button>
+                          <button type="button" className="btn btn--secondary btn--sm" disabled={busy === it.id} onClick={() => void reconcile(it.id, "published")}>
+                            投稿されていた(メディアIDを記録)
+                          </button>
+                        </span>
+                      ) : null}
                     </div>
                   ) : null}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

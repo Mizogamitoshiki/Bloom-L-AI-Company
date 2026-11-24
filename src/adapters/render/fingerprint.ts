@@ -31,10 +31,12 @@ const TEMPLATE_SOURCE: Record<string, string> = {
   "tpl-news": "tpl-news.ts",
   "tpl-portfolio": "tpl-portfolio.ts",
   "tpl-compare": "tpl-compare.ts",
+  "tpl-sample": "tpl-sample.ts",
 };
 /** 系統固有のレンダリング依存。変更時は該当系統だけfingerprintを更新する。 */
 const TEMPLATE_EXTRA_SOURCES: Record<string, readonly string[]> = {
   "tpl-portfolio": ["../../adapters/render/portfolio-media.ts"],
+  "tpl-sample": ["../../adapters/render/sample-media.ts"],
 };
 
 /** fingerprintのmaterial(この内容が変わればfingerprintが変わる)。純データ */

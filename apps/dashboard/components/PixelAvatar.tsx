@@ -23,7 +23,6 @@ const PORTRAIT_BY_SEED: Record<string, string> = {
   emp_tsumugi: "/office-v46/faces/14_momoka_face.png",
   emp_shion: "/office-v46/faces/09_haru_face.png",
   emp_minato: "/office-v46/faces/08_sakura_face.png",
-  emp_hinata: "/office-v46/faces/12_meeting_right_face.png",
   "bloom-manager": "/office-v46/faces/03_ceo_face.png",
   "bloom-owner": "/office-v46/faces/03_ceo_face.png",
 };

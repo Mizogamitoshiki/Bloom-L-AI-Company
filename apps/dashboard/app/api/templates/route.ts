@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { openDb } from "@adapters/db/client";
-import { listTemplateVersions, listTemplateVariantQa, templateApprovability } from "@adapters/db/store";
+import { listTemplateVersions, listTemplateVariantQa, templateApprovability, renderTemplateVersion } from "@adapters/db/store";
 import { TEMPLATES } from "@core/templates/index";
 import { workspaceRoot } from "@adapters/root";
 import { toFriendlyMessage } from "@/lib/errors";
@@ -20,7 +20,10 @@ export function GET(): NextResponse {
       const items = templateIds.map((templateId) => {
         const versionsForTpl = allVersions.filter((v) => v.templateId === templateId).sort((a, b) => b.version - a.version);
         const latest = versionsForTpl[0];
-        if (!latest) return { templateId, family: (TEMPLATES as Record<string, { family: string }>)[templateId]!.family, version: null, variants: [] };
+        if (!latest) return { templateId, family: (TEMPLATES as Record<string, { family: string }>)[templateId]!.family, version: null, variants: [], publishVersion: null };
+        // 実際にレンダリング・公開(書き出し)に使われる版。承認済み版が現行コードと一致する場合のみ非null
+        const rv = renderTemplateVersion(db, templateId);
+        const publishVersion = versionsForTpl.find((v) => v.version === rv)?.status === "approved" ? rv : null;
         const declaredVariants = (TEMPLATES as Record<string, { variants: readonly string[] }>)[templateId]!.variants;
         const qaRows = listTemplateVariantQa(db, templateId, latest.version);
         const variants = declaredVariants.map((variant) => {
@@ -35,6 +38,7 @@ export function GET(): NextResponse {
         return {
           templateId, family: latest.family, version: latest.version, status: latest.status, fingerprint: latest.fingerprint,
           note: latest.note, variants, approvability: templateApprovability(db, templateId, latest.version),
+          publishVersion,
           versionHistory: versionsForTpl.map((v) => ({ version: v.version, status: v.status })),
         };
       });

@@ -90,6 +90,8 @@ export const posts = sqliteTable(
     rightsState: text("rights_state").notNull().default("n/a"),
     templateId: text("template_id").notNull().default("tpl-howto"),
     portfolioItemId: text("portfolio_item_id"),
+    /** V10: tpl-sample投稿が紹介するサンプルサイト(site_samples.id)。nullable=既存動作に影響なし */
+    sampleId: text("sample_id"),
     createdAt: text("created_at"),
   },
   (t) => [
@@ -143,6 +145,73 @@ export const portfolioItems = sqliteTable(
     testimonial: text("testimonial"),
   },
   (t) => [index("portfolio_items_perm_idx").on(t.permissionId)],
+);
+
+// ---- V10(docs/32): サイトサンプル ----
+
+/** 代表者のサンプル依頼(intake)。attested_at=素材の権利宣言(owner操作・audit_logにも記録) */
+export const sampleRequests = sqliteTable(
+  "sample_requests",
+  {
+    id: text("id").primaryKey(),
+    slug: text("slug").notNull(),
+    siteTitle: text("site_title"),
+    industry: text("industry").notNull(),
+    persona: text("persona").notNull(), // P1 | P2 | P3
+    planTarget: text("plan_target").notNull().default("auto"), // ume | take | matsu | auto
+    pagesJson: text("pages_json").notNull(),
+    brief: text("brief").notNull().default(""),
+    status: text("status").notNull().default("new"), // new | building | qa | ready | posted | declined
+    attestedAt: text("attested_at").notNull(),
+    attestedBy: text("attested_by").notNull(),
+    declineReason: text("decline_reason"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("sample_requests_slug_uq").on(t.slug), index("sample_requests_status_idx").on(t.status, t.createdAt)],
+);
+
+/** 投入素材。kind=design(忠実再現の対象)/hero/logo/photo/reference(参考のみ・画面に出さない) */
+export const sampleAssets = sqliteTable(
+  "sample_assets",
+  {
+    id: text("id").primaryKey(),
+    requestId: text("request_id").notNull().references(() => sampleRequests.id),
+    kind: text("kind").notNull(),
+    fileName: text("file_name").notNull(),
+    safeRelativePath: text("safe_relative_path").notNull(),
+    sha256: text("sha256").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    bytes: integer("bytes").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("sample_assets_request_idx").on(t.requestId), uniqueIndex("sample_assets_file_uq").on(t.requestId, t.fileName)],
+);
+
+/** ビルド済みサンプルサイト(version単位)。撮影PNGのhashを刻印し、差し替えを検知する */
+export const siteSamples = sqliteTable(
+  "site_samples",
+  {
+    id: text("id").primaryKey(),
+    requestId: text("request_id").notNull().references(() => sampleRequests.id),
+    version: integer("version").notNull(),
+    siteTitle: text("site_title").notNull(),
+    concept: text("concept").notNull(),
+    planFit: text("plan_fit").notNull(),
+    planFitReason: text("plan_fit_reason").notNull(),
+    dirPath: text("dir_path").notNull(), // workspace相対 02_site-samples/<requestId>/v<n>
+    htmlSha256: text("html_sha256").notNull(),
+    screenshotsJson: text("screenshots_json").notNull(), // SampleScreenshotRef[]
+    artifactId: text("artifact_id").notNull(), // site_sample成果物(artifacts.id)
+    builderTaskId: text("builder_task_id").notNull(),
+    designQaResult: text("design_qa_result"), // 紬の視覚QA: pass | fail | null(未実施)
+    designQaJson: text("design_qa_json"),
+    deployUrl: text("deploy_url"),
+    deployedAt: text("deployed_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("site_samples_request_idx").on(t.requestId, t.version)],
 );
 
 export const customerPermissions = sqliteTable("customer_permissions", {
@@ -300,6 +369,10 @@ export const postRenders = sqliteTable(
     designQaJson: text("design_qa_json"),
     visualQaResult: text("visual_qa_result"), // pass | fail | null(未実施)。V4.5 v2
     visualQaJson: text("visual_qa_json"),
+    // V8(D-18): レンダリング経路。satori=通常コード / canva=外部(Canva MCP)書き出し
+    renderEngine: text("render_engine").notNull().default("satori"),
+    // V8: 外部レンダリングの参照ID(CanvaデザインID等)。satoriではnull
+    externalRef: text("external_ref"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [index("post_renders_post_idx").on(t.postId, t.createdAt)],
@@ -469,4 +542,20 @@ export const postMediaUploads = sqliteTable(
     uniqueIndex("post_media_uploads_post_idx_uq").on(t.postId, t.imageIndex),
     index("post_media_uploads_sha_idx").on(t.provider, t.sha256),
   ],
+);
+
+// V7: 代表者アイデアボックス。CEOの思いつきを記録し、kickoff/weekly-reviewが実行へ変換する。
+// 実行自体は既存の安全経路(企画→QA→承認キュー)を通る(アイデア登録は公開ゲートを迂回しない)。
+export const ownerIdeas = sqliteTable(
+  "owner_ideas",
+  {
+    id: text("id").primaryKey(),
+    text: text("text").notNull(),
+    status: text("status").notNull().default("new"), // new | planned | in_progress | done | declined
+    resolution: text("resolution"), // どう実現したか/しない理由(planned以降で記録)
+    resolutionRefJson: text("resolution_ref_json"), // {postId?, taskId?} 実現先への参照
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [index("owner_ideas_status_idx").on(t.status, t.createdAt)],
 );

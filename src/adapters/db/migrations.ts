@@ -527,6 +527,194 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // V7: AI社員体制の拡張(代表者指示 2026-07-17。DECISIONS.md D-16)。
+    // マーケティング本部/インスタ運用チームの2階層へ再編し、秘書・PM・PMO・
+    // リサーチプロフェッショナルの4名を追加。既存データは削除しない(追加+付け替えのみ)。
+    id: 14,
+    name: "v7-org-expansion",
+    precheck(sqlite) {
+      // 対象4名(emp_sora/kotoha/tsumugi/shion)は「0件(新規DB・この4名を持たない古いテストDB等。
+      // 何も付け替えず新設データだけ追加すれば安全)」か「4件(実DB・想定どおりの既存構成)」の
+      // どちらかだけを許可する。1〜3件の中途半端な一致は状態不整合として停止する。
+      const present = (
+        sqlite
+          .prepare("select count(*) n from employees where id in ('emp_sora','emp_kotoha','emp_tsumugi','emp_shion')")
+          .get() as { n: number }
+      ).n;
+      if (present !== 0 && present !== 4) {
+        throw new MigrationError(
+          "マイグレーションを停止しました(データは変更していません)。\n" +
+            `- インスタ運用チームへ付け替える対象社員(emp_sora/emp_kotoha/emp_tsumugi/emp_shion)が${present}件のみ一致し、状態が不整合です。既存DBの内容を確認してください。`,
+        );
+      }
+    },
+    up(sqlite) {
+      sqlite.exec(`
+        -- 新規DB(ensureSeedOrgでのシード前)ではdepartmentsも空のため、新設employeesのFK先として
+        -- dept_marketingを先に用意する(既存DBでは既にあるため無害にスキップされる)。
+        INSERT INTO departments (id, name, status, unlock_note)
+          SELECT 'dept_marketing', 'Bloom-L AIマーケティング本部', 'active', NULL
+          WHERE NOT EXISTS (SELECT 1 FROM departments WHERE id = 'dept_marketing');
+
+        INSERT INTO departments (id, name, status, unlock_note)
+          SELECT 'dept_ig_ops', 'インスタ運用チーム', 'active', NULL
+          WHERE NOT EXISTS (SELECT 1 FROM departments WHERE id = 'dept_ig_ops');
+
+        UPDATE departments SET name = 'Bloom-L AIマーケティング本部'
+          WHERE id = 'dept_marketing' AND name = 'Bloom-L AIマーケティング部';
+
+        UPDATE employees SET department_id = 'dept_ig_ops'
+          WHERE id IN ('emp_sora', 'emp_kotoha', 'emp_tsumugi', 'emp_shion');
+
+        UPDATE employees SET role = 'CMO(集客戦略統括)'
+          WHERE id = 'emp_ren' AND role = '集客戦略責任者';
+
+        INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile, persona_json)
+          SELECT 'emp_mizuki', 'dept_marketing', '美月', 'CEO秘書', 'mizuki', 'light',
+                 '{"spriteHue":300,"activeInMvp":true}'
+          WHERE NOT EXISTS (SELECT 1 FROM employees WHERE id = 'emp_mizuki');
+
+        INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile, persona_json)
+          SELECT 'emp_kikyou', 'dept_marketing', '桔梗', 'PM(進行管理担当)', 'kikyou', 'standard',
+                 '{"spriteHue":15,"activeInMvp":true}'
+          WHERE NOT EXISTS (SELECT 1 FROM employees WHERE id = 'emp_kikyou');
+
+        INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile, persona_json)
+          SELECT 'emp_kaede', 'dept_marketing', '楓', 'PMO(品質・プロセス統括担当)', 'kaede', 'standard',
+                 '{"spriteHue":120,"activeInMvp":true}'
+          WHERE NOT EXISTS (SELECT 1 FROM employees WHERE id = 'emp_kaede');
+
+        INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile, persona_json)
+          SELECT 'emp_azusa', 'dept_marketing', '梓', 'リサーチプロフェッショナル(上級検証担当)', 'azusa', 'heavy',
+                 '{"spriteHue":60,"activeInMvp":true}'
+          WHERE NOT EXISTS (SELECT 1 FROM employees WHERE id = 'emp_azusa');
+      `);
+    },
+  },
+  {
+    // V7: 代表者アイデアボックス。代表者がその場で思いついたことを記録し、
+    // kickoff/weekly-reviewのオーケストレーターが実行(投稿企画・タスク化・会議議題)へ変換する。
+    id: 15,
+    name: "v7-owner-ideas",
+    up(sqlite) {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS owner_ideas (
+          id TEXT PRIMARY KEY,
+          text TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'new',
+          resolution TEXT,
+          resolution_ref_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS owner_ideas_status_idx ON owner_ideas (status, created_at);
+      `);
+    },
+  },
+  {
+    // V8(D-18): Canva外部レンダリング経路。post_rendersにエンジン種別と外部参照IDを追加。
+    // 既存行はすべてsatori(通常コード)由来のためデフォルト'satori'で正しい。
+    id: 16,
+    name: "v8-canva-external-render",
+    up(sqlite) {
+      addColumnIfMissing(sqlite, "post_renders", "render_engine", "render_engine TEXT NOT NULL DEFAULT 'satori'");
+      addColumnIfMissing(sqlite, "post_renders", "external_ref", "external_ref TEXT");
+    },
+  },
+  {
+    // V8(2026-07-27): 実働ゼロの陽葵(emp_hinata, DM支援・第2段階専用)を代表者指示で削除。
+    // タスク履歴が存在する場合はデータ保全のため削除せず中止する(precheck)。
+    id: 17,
+    name: "v8-remove-hinata",
+    precheck(sqlite) {
+      const n = count(sqlite, "SELECT COUNT(*) as n FROM tasks WHERE assignee_id = 'emp_hinata'");
+      if (n > 0) {
+        throw new MigrationError(
+          `emp_hinataに${n}件のタスク履歴があるため削除できません。削除する場合は履歴の扱いを代表者に確認してください`,
+        );
+      }
+    },
+    up(sqlite) {
+      sqlite.exec("DELETE FROM employees WHERE id = 'emp_hinata'");
+    },
+  },
+  {
+    // V10(docs/32, D-19): 1日1サイトサンプル。代表者のデザイン画像をHTMLで忠実再現→撮影→tpl-sample投稿。
+    // - AI Web制作部(dept_web)を限定解放し、Web制作担当「颯(emp_hayate)」を追加(代表者指示 2026-08-26)
+    // - sample_requests / sample_assets / site_samples を新設、posts.sample_id を追加(nullable=既存動作不変)
+    id: 18,
+    name: "v10-site-samples",
+    up(sqlite) {
+      sqlite.exec(`
+        INSERT INTO departments (id, name, status, unlock_note)
+          SELECT 'dept_web', 'AI Web制作部', 'active', '2026-08-26 代表者指示で限定解放(サンプルサイト制作)。制作進行管理・素材収集支援は受注が月2件を超えたときに拡張。'
+          WHERE NOT EXISTS (SELECT 1 FROM departments WHERE id = 'dept_web');
+        UPDATE departments SET status = 'active',
+          unlock_note = '2026-08-26 代表者指示で限定解放(サンプルサイト制作)。制作進行管理・素材収集支援は受注が月2件を超えたときに拡張。'
+          WHERE id = 'dept_web';
+        INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile, persona_json)
+          SELECT 'emp_hayate', 'dept_web', '颯', 'Web制作担当', 'hayate', 'standard', '{"spriteHue":45,"activeInMvp":true}'
+          WHERE NOT EXISTS (SELECT 1 FROM employees WHERE id = 'emp_hayate');
+
+        CREATE TABLE IF NOT EXISTS sample_requests (
+          id TEXT PRIMARY KEY,
+          slug TEXT NOT NULL,
+          site_title TEXT,
+          industry TEXT NOT NULL,
+          persona TEXT NOT NULL,
+          plan_target TEXT NOT NULL DEFAULT 'auto',
+          pages_json TEXT NOT NULL,
+          brief TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'new',
+          attested_at TEXT NOT NULL,
+          attested_by TEXT NOT NULL,
+          decline_reason TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS sample_requests_slug_uq ON sample_requests (slug);
+        CREATE INDEX IF NOT EXISTS sample_requests_status_idx ON sample_requests (status, created_at);
+
+        CREATE TABLE IF NOT EXISTS sample_assets (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL REFERENCES sample_requests(id),
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          safe_relative_path TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          width INTEGER NOT NULL,
+          height INTEGER NOT NULL,
+          bytes INTEGER NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sample_assets_request_idx ON sample_assets (request_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS sample_assets_file_uq ON sample_assets (request_id, file_name);
+
+        CREATE TABLE IF NOT EXISTS site_samples (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL REFERENCES sample_requests(id),
+          version INTEGER NOT NULL,
+          site_title TEXT NOT NULL,
+          concept TEXT NOT NULL,
+          plan_fit TEXT NOT NULL,
+          plan_fit_reason TEXT NOT NULL,
+          dir_path TEXT NOT NULL,
+          html_sha256 TEXT NOT NULL,
+          screenshots_json TEXT NOT NULL,
+          artifact_id TEXT NOT NULL,
+          builder_task_id TEXT NOT NULL,
+          design_qa_result TEXT,
+          design_qa_json TEXT,
+          deploy_url TEXT,
+          deployed_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS site_samples_request_idx ON site_samples (request_id, version);
+      `);
+      addColumnIfMissing(sqlite, "posts", "sample_id", "sample_id TEXT");
+    },
+  },
 ];
 
 /**

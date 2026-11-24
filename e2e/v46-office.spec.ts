@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("V4.6 プレミアムオフィス", () => {
-  test("デスクトップは参照全景と9名の実データ操作レイヤーを表示する", async ({ page }) => {
+  test("デスクトップは参照全景と14名の実データ操作レイヤーを表示する", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto("/");
 
@@ -15,9 +15,9 @@ test.describe("V4.6 プレミアムオフィス", () => {
     await expect(scene.locator(".office-scene__image")).toHaveCount(0);
 
     const employeeButtons = scene.locator("button[data-employee]");
-    await expect(employeeButtons).toHaveCount(9);
+    await expect(employeeButtons).toHaveCount(13);
     const motionLayers = scene.locator("[data-motion-employee]");
-    await expect(motionLayers).toHaveCount(9);
+    await expect(motionLayers).toHaveCount(13);
     await expect(page.getByRole("button", { name: /葵、AI社長補佐/ })).toBeVisible();
     await expect(scene.locator(".office-employee-card .sprite--portrait img")).toBeVisible();
 
@@ -60,7 +60,7 @@ test.describe("V4.6 プレミアムオフィス", () => {
     await expect(page.locator(".office-scene")).toBeHidden();
     const roster = page.getByLabel("AI社員の状態カード");
     await expect(roster).toBeVisible();
-    await expect(roster.locator(".office-mobile-employee")).toHaveCount(9);
+    await expect(roster.locator(".office-mobile-employee")).toHaveCount(13);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow).toBeLessThanOrEqual(1);
 

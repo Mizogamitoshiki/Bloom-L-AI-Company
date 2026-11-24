@@ -3,7 +3,7 @@
  * 進捗率は計算しない。推定値は「推定」と明示する。
  */
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import type { Db } from "./client";
 import * as t from "./schema";
@@ -13,16 +13,21 @@ import {
   assertPostContentIntegrity,
   getCompanyState,
   listApprovalQueue,
+  currentTemplateVersion,
+  getTemplateVersion,
+  templateFingerprintMatchesCurrent,
   type GenerationPause,
   type CompanyStateView,
 } from "./store";
 import { loadLimits, brandStatus } from "../config";
 import { workspaceRoot } from "../root";
 import { listBackups } from "../backup/backup";
-import { carouselSpecSchema, permissionScopeSchema, type ReportArtifact } from "../../core/schemas";
+import { carouselSpecSchema, permissionScopeSchema, TEMPLATE_IDS, type ReportArtifact } from "../../core/schemas";
 import { resolvePortfolioAssetFile, PortfolioMediaError } from "../render/portfolio-media";
 import { todayLocal, businessDate } from "../../core/ids";
 import { EMPLOYEES } from "../../core/org";
+import { PERSONAS } from "../../core/personas";
+import { findRepoRoot } from "../root";
 
 // ---------- S-04 投稿パイプライン ----------
 
@@ -457,6 +462,115 @@ export function doctorScan(db: Db): DoctorFinding[] {
     // listBackups失敗は致命ではない
   }
 
+  // 改善#6: テンプレート版のstale検査。承認後にコードが変更されfingerprintが乖離した版、
+  // 決定されないまま残っているdraft版を検出する(公開停止ガード自体は別途強制されるが、
+  // 代表者が気づく前にkickoffが止まる/止まらないの判断材料として明示する)。
+  const STALE_DRAFT_DAYS = 3;
+  for (const templateId of TEMPLATE_IDS) {
+    const version = currentTemplateVersion(db, templateId);
+    const row = getTemplateVersion(db, templateId, version);
+    if (!row) continue;
+    if (row.status === "approved" && !templateFingerprintMatchesCurrent(db, templateId, version)) {
+      findings.push({
+        level: "error",
+        subject: `template ${templateId}`,
+        message: `テンプレート「${templateId}」は承認済み(v${version})ですが、承認後にコードが変更されfingerprintが一致しません`,
+        fix: "プレビューを再生成し、紫苑のテンプレート視覚QAを経て代表者に再承認を依頼してください",
+      });
+    } else if (row.status === "draft") {
+      const ageMs = Date.now() - new Date(row.createdAt).getTime();
+      if (ageMs > STALE_DRAFT_DAYS * 24 * 60 * 60 * 1000) {
+        findings.push({
+          level: "warn",
+          subject: `template ${templateId}`,
+          message: `テンプレート「${templateId}」v${version}が${STALE_DRAFT_DAYS}日以上draftのまま未決定です(${row.createdAt}作成)`,
+          fix: "プレビュー・QAを揃えて代表者の承認/却下を依頼するか、対応不要なら理由を記録してください",
+        });
+      }
+    }
+  }
+
+  // 改善#7: QA「要確認」メモの集約。qa_reviews.notesは公開ブロックしない軽微指摘のため
+  // 見落としやすい。承認待ち・下書き中の投稿について、代表者確認を求める文言を含む
+  // 最新QAメモをdoctorへ集約表示する。
+  const activePosts = db.select().from(t.posts).where(inArray(t.posts.status, ["awaiting_approval", "drafting", "qa_review"])).all();
+  for (const p of activePosts) {
+    const latestQa = db.select().from(t.qaReviews).where(eq(t.qaReviews.postId, p.id)).orderBy(desc(t.qaReviews.createdAt)).limit(1).get();
+    if (!latestQa?.notesJson) continue;
+    let notes: unknown[] = [];
+    try {
+      notes = JSON.parse(latestQa.notesJson);
+    } catch {
+      continue;
+    }
+    const flagged = notes.filter((n): n is string => typeof n === "string" && n.includes("確認") && (n.includes("要") || n.includes("代表者")));
+    for (const note of flagged) {
+      findings.push({
+        level: "warn",
+        subject: `post ${p.id}`,
+        message: `「${p.title}」のQAメモに確認依頼があります: ${note.slice(0, 120)}`,
+        fix: "/approvals で内容を確認し、問題なければそのまま承認、要修正なら修正依頼にしてください",
+      });
+    }
+  }
+
+  // 改善#8: V6改善ループの稼働状況。スナップショット未生成・長期間未生成は
+  // ループが実質休眠していることを示す(エラーではなく運用上の気づきとしてwarn)。
+  const DORMANT_DAYS = 14;
+  const latestSnapshot = db.select().from(t.analysisSnapshots).orderBy(desc(t.analysisSnapshots.createdAt)).limit(1).get();
+  if (!latestSnapshot) {
+    findings.push({
+      level: "warn",
+      subject: "improvement-loop",
+      message: "V6改善ループの分析スナップショットがまだ一度も生成されていません",
+      fix: "pnpm company analytics-snapshot --window 7 を実行してください",
+    });
+  } else {
+    const ageMs = Date.now() - new Date(latestSnapshot.createdAt).getTime();
+    if (ageMs > DORMANT_DAYS * 24 * 60 * 60 * 1000) {
+      findings.push({
+        level: "warn",
+        subject: "improvement-loop",
+        message: `最新の分析スナップショットが${DORMANT_DAYS}日以上更新されていません(${latestSnapshot.createdAt})`,
+        fix: "pnpm company analytics-snapshot --window 7 で再生成し、改善ループを継続するか代表者に確認してください",
+      });
+    }
+  }
+  const undecidedProposals = db
+    .select({ id: t.improvementProposals.id })
+    .from(t.improvementProposals)
+    .all()
+    .filter((row) => !db.select({ id: t.improvementDecisions.id }).from(t.improvementDecisions).where(eq(t.improvementDecisions.proposalId, row.id)).get());
+  if (undecidedProposals.length > 0) {
+    findings.push({
+      level: "warn",
+      subject: "improvement-loop",
+      message: `代表者の判断が未記録の改善提案が${undecidedProposals.length}件あります`,
+      fix: "pnpm company improvement-list で確認し、pnpm company improvement-decide で判断してください",
+    });
+  }
+
+  // 改善#10: runs/ の保持方針(docs/13は「7日で自動削除」を推奨としているが、
+  // 実際に削除するバッチ処理は存在しない。gitには入らない使い捨てデータのため、
+  // doctorが古いものを検出し代表者/オーケストレーターに手動整理を促す(自動削除はしない)。
+  const RUNS_RETENTION_DAYS = 7;
+  try {
+    const runsDir = path.join(findRepoRoot(), "runs");
+    const dateDirs = existsSync(runsDir) ? readdirSync(runsDir).filter((name) => /^\d{4}-\d{2}-\d{2}$/.test(name)) : [];
+    const cutoff = Date.now() - RUNS_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const stale = dateDirs.filter((name) => new Date(`${name}T00:00:00Z`).getTime() < cutoff).sort();
+    if (stale.length > 0) {
+      findings.push({
+        level: "warn",
+        subject: "runs",
+        message: `runs/ に保持期間(${RUNS_RETENTION_DAYS}日)を超えた古いディレクトリが${stale.length}件あります(${stale.slice(0, 3).join(", ")}${stale.length > 3 ? " 他" : ""})`,
+        fix: "gitignore対象の使い捨てコンテキストです。内容を確認のうえ rm -rf runs/<日付> で手動削除してください(自動削除は行いません)",
+      });
+    }
+  } catch {
+    // runs/未作成・権限エラーは致命ではない
+  }
+
   return findings;
 }
 
@@ -760,4 +874,135 @@ export function listMeetings(db: Db): MeetingView[] {
       minutes,
     };
   });
+}
+
+// ---------- V7: AI社員管理画面(/employees) ----------
+// 「この画面を見ればAI社員のすべてがわかる」ための統合ビュー。
+// プロフィール(personas.ts)+ 稼働状態(getCompanyState)+ 仕事の実績(DB集計)を1件にまとめる。
+
+export interface EmployeeAdminItem {
+  id: string;
+  name: string;
+  role: string;
+  agentRef: string;
+  departmentId: string;
+  modelProfile: string;
+  activeInMvp: boolean;
+  spriteHue: number;
+  display: CompanyStateView["employees"][number]["display"];
+  currentTaskTitle: string | null;
+  /** ペルソナ(personas.ts定義。UIで職務・権限・禁止事項を開示する) */
+  persona: {
+    personality: string;
+    purpose: string;
+    tools: string[];
+    inputs: string[];
+    outputs: string[];
+    prohibitions: string[];
+    onFailure: string;
+  } | null;
+  stats: {
+    tasksDone: number;
+    tasksFailed: number;
+    tasksTotal: number;
+    artifacts: number;
+    estOutputChars: number;
+    wallSeconds: number;
+    lastActivityAt: string | null;
+  };
+  recentTasks: { id: string; title: string; type: string; status: string; runDate: string; finishedAt: string | null }[];
+}
+
+export interface EmployeesAdminView {
+  departments: { id: string; name: string; status: string; unlockNote: string | null }[];
+  employees: EmployeeAdminItem[];
+}
+
+export function employeesAdminView(db: Db, now: Date = new Date()): EmployeesAdminView {
+  const state = getCompanyState(db, now);
+  const agentRefById = new Map(EMPLOYEES.map((e) => [e.id, e.agentRef]));
+  const personaByRef = new Map(PERSONAS.map((p) => [p.agentRef, p]));
+
+  const employees = state.employees.map((v): EmployeeAdminItem => {
+    const agentRef = agentRefById.get(v.id) ?? "";
+    const persona = personaByRef.get(agentRef as (typeof PERSONAS)[number]["agentRef"]) ?? null;
+    const counts = db
+      .select({ status: t.tasks.status, n: sql<number>`count(*)` })
+      .from(t.tasks)
+      .where(eq(t.tasks.assigneeId, v.id))
+      .groupBy(t.tasks.status)
+      .all();
+    const byStatus = new Map(counts.map((c) => [c.status, c.n]));
+    const tasksTotal = counts.reduce((sum, c) => sum + c.n, 0);
+    const artifacts =
+      db
+        .select({ n: sql<number>`count(*)` })
+        .from(t.artifacts)
+        .innerJoin(t.tasks, eq(t.artifacts.taskId, t.tasks.id))
+        .where(eq(t.tasks.assigneeId, v.id))
+        .get()?.n ?? 0;
+    const usage = db
+      .select({
+        o: sql<number>`coalesce(sum(${t.usageRecords.estOutputChars}),0)`,
+        w: sql<number>`coalesce(sum(${t.usageRecords.wallSeconds}),0)`,
+      })
+      .from(t.usageRecords)
+      .innerJoin(t.tasks, eq(t.usageRecords.taskId, t.tasks.id))
+      .where(eq(t.tasks.assigneeId, v.id))
+      .get();
+    const lastActivity = db
+      .select({ ts: sql<string | null>`max(coalesce(${t.tasks.finishedAt}, ${t.tasks.startedAt}, ${t.tasks.createdAt}))` })
+      .from(t.tasks)
+      .where(eq(t.tasks.assigneeId, v.id))
+      .get();
+    const recentTasks = db
+      .select({
+        id: t.tasks.id,
+        title: t.tasks.title,
+        type: t.tasks.type,
+        status: t.tasks.status,
+        runDate: t.tasks.runDate,
+        finishedAt: t.tasks.finishedAt,
+      })
+      .from(t.tasks)
+      .where(eq(t.tasks.assigneeId, v.id))
+      .orderBy(desc(t.tasks.createdAt))
+      .limit(5)
+      .all();
+    return {
+      id: v.id,
+      name: v.name,
+      role: v.role,
+      agentRef,
+      departmentId: v.departmentId,
+      modelProfile: v.modelProfile,
+      activeInMvp: v.activeInMvp,
+      spriteHue: v.spriteHue,
+      display: v.display,
+      currentTaskTitle: v.currentTaskTitle,
+      persona: persona
+        ? {
+            personality: persona.personality,
+            purpose: persona.purpose,
+            tools: persona.tools,
+            inputs: persona.inputs,
+            outputs: persona.outputs,
+            prohibitions: persona.prohibitions,
+            onFailure: persona.onFailure,
+          }
+        : null,
+      stats: {
+        tasksDone: byStatus.get("done") ?? 0,
+        tasksFailed: byStatus.get("failed") ?? 0,
+        tasksTotal,
+        artifacts,
+        estOutputChars: usage?.o ?? 0,
+        wallSeconds: usage?.w ?? 0,
+        lastActivityAt: lastActivity?.ts ?? null,
+      },
+      recentTasks,
+    };
+  });
+
+  return { departments: state.departments, employees };
 }

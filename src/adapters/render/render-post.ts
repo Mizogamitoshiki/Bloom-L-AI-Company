@@ -16,12 +16,12 @@ import {
   checkPortfolioRights,
   listPortfolio,
   ensureTemplateVersion,
-  currentTemplateVersion,
+  renderTemplateVersion,
   recordPostRender,
 } from "../db/store";
 import { buildSpecFromContent } from "../../core/templates/tpl-howto";
 import { templateFor } from "../../core/templates/index";
-import type { CarouselSpec, Copy, NewsCopy, PortfolioCopy } from "../../core/schemas";
+import type { CarouselSpec, Copy, NewsCopy, PortfolioCopy, CompareCopy } from "../../core/schemas";
 import { carouselSpecSchema } from "../../core/schemas";
 import { renderCarousel, OverflowError } from "./renderer";
 import { runDesignQa } from "./design-qa";
@@ -29,6 +29,10 @@ import { findRepoRoot } from "../root";
 import { todayLocal } from "../../core/ids";
 import { resolvePortfolioMedia, PortfolioMediaError } from "./portfolio-media";
 import type { TemplateRenderAssets } from "../../core/templates/index";
+import type { SampleCopy } from "../../core/schemas";
+import { getSiteSample, siteSampleScreenshots } from "../db/samples";
+import { resolveSampleScreenshotMedia, SampleMediaError } from "./sample-media";
+import { priceBandFor } from "../config";
 
 export class RightsError extends Error {
   constructor(message: string) {
@@ -48,7 +52,8 @@ export type RenderPostResult =
       imageArtifactIds: string[];
     };
 
-async function buildSpec(
+/** V8(D-18): Canva外部レンダリング登録(src/adapters/canva)と共用するためexport。権利・source前提の検査を含む */
+export async function buildSpecForPost(
   db: Db,
   postId: string,
   copyArtifactId: string,
@@ -81,6 +86,52 @@ async function buildSpec(
         publishedAt: s.publishedAt,
       })),
     }) };
+  }
+  if (template.id === "tpl-compare") {
+    return { spec: carouselSpecSchema.parse({
+      kind: "carousel_spec",
+      templateId: "tpl-compare",
+      pillar: plan.pillar,
+      sourceCopyArtifactId: copyArtifactId,
+      slides: (copy as CompareCopy).slides,
+    }) };
+  }
+  if (template.id === "tpl-sample") {
+    // V10: 紬の視覚QAに合格したサンプルの撮影画像だけを使う。価格帯はconfig/pricing.yamlから注入(AIは書かない)
+    if (!post.sampleId) throw new Error("tpl-sampleの投稿にsampleIdがありません");
+    const sample = getSiteSample(db, post.sampleId);
+    if (sample.designQaResult !== "pass") {
+      throw new RightsError("サンプルサイトが紬の視覚QA(忠実度)に合格していないためレンダリングできません");
+    }
+    const shots = siteSampleScreenshots(sample);
+    const pcRef = shots.find((s) => s.name === "pc-fold");
+    const spRef = shots.find((s) => s.name === "sp-fold");
+    if (!pcRef || !spRef) throw new Error("サンプルの撮影画像(pc-fold/sp-fold)が記録されていません");
+    let pc: Awaited<ReturnType<typeof resolveSampleScreenshotMedia>>;
+    let sp: Awaited<ReturnType<typeof resolveSampleScreenshotMedia>>;
+    try {
+      pc = await resolveSampleScreenshotMedia(pcRef);
+      sp = await resolveSampleScreenshotMedia(spRef);
+    } catch (error) {
+      if (error instanceof SampleMediaError) throw new RightsError(`サンプル撮影画像を使用できません: ${error.message}`);
+      throw error;
+    }
+    const sampleCopy = copy as SampleCopy;
+    const spec = carouselSpecSchema.parse({
+      kind: "carousel_spec",
+      templateId: "tpl-sample",
+      pillar: plan.pillar,
+      sourceCopyArtifactId: copyArtifactId,
+      slides: sampleCopy.slides,
+      sampleId: sample.id,
+      sampleTitle: sample.siteTitle,
+      screenshots: { pcFold: pcRef, spFold: spRef },
+      priceBand: priceBandFor(sampleCopy.slides.plan.planId),
+    });
+    return {
+      spec,
+      assets: { sampleShots: { pcFold: { dataUri: pc.dataUri, sha256: pcRef.sha256 }, spFold: { dataUri: sp.dataUri, sha256: spRef.sha256 } } },
+    };
   }
   // tpl-portfolio: 許可検査(V3-C)。displayNameは通常コードが決定する
   if (!post.portfolioItemId) throw new Error("tpl-portfolioの投稿にportfolioItemIdがありません");
@@ -132,7 +183,7 @@ export async function renderPost(
   if (!copy || copyVersion === null || !copyArtifactId) throw new Error(`投稿 ${postId} にコピー成果物がありません`);
 
   // 権利・source前提の検査はタスク生成前に行う(不許可素材はレンダリング自体を開始しない)
-  const built = await buildSpec(db, postId, copyArtifactId);
+  const built = await buildSpecForPost(db, postId, copyArtifactId);
   const { spec } = built;
 
   const { task, created } = createTask(
@@ -156,9 +207,10 @@ export async function renderPost(
   const base = opts.outDirBase ?? path.join(findRepoRoot(), "data", "workspace", "05_generated-posts");
   const outDir = path.join(base, postId, `v${copyVersion}`);
   try {
-    // 現行テンプレート版を用意し、その版でレンダリング(fingerprint整合)
+    // 承認済み版のコードが現行実装と一致していればその版で、そうでなければ現行版でレンダリング
+    // (未決定のdraft版が残っていてもexport可能な承認済み版を優先する。fingerprint整合)
     ensureTemplateVersion(db, spec.templateId, actor);
-    const templateVersion = currentTemplateVersion(db, spec.templateId);
+    const templateVersion = renderTemplateVersion(db, spec.templateId);
     const result = await renderCarousel(spec, outDir, { templateVersion, assets: built.assets });
     const saved = addRenderArtifacts(db, task.id, spec, result.files, actor);
     // design QA(通常コード)を実行し、レンダリング記録を残す(公開停止ガードの根拠)

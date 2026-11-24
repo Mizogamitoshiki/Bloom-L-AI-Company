@@ -4,7 +4,7 @@
  * - 「最新」・統計系表現のsource要求判定(config/qa-rules.yaml)
  */
 import { z } from "zod";
-import type { Copy, NewsCopy, PortfolioCopy } from "./schemas";
+import type { Copy, NewsCopy, PortfolioCopy, CompareCopy, SampleCopy } from "./schemas";
 
 export const forbiddenConfigSchema = z.object({
   categories: z.array(
@@ -35,7 +35,7 @@ export interface ForbiddenHit {
 }
 
 /** 公開されるテキストを全コピー種別から抽出する */
-export function collectPublicText(copy: Copy | NewsCopy | PortfolioCopy): string {
+export function collectPublicText(copy: Copy | NewsCopy | PortfolioCopy | CompareCopy | SampleCopy): string {
   const parts: string[] = [copy.headline, copy.body, copy.cta, ...copy.hashtags];
   const s = copy.slides as Record<string, unknown>;
   const walk = (v: unknown): void => {

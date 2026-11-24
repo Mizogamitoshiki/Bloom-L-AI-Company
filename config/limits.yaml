@@ -1,11 +1,15 @@
 # 利用量・安全装置のしきい値(docs/14)
+# 2026-07-17 代表者指示によりAI社員13名体制へ拡張(DECISIONS.md D-16)。
+# Maxプラン定額のため引き上げ自体に追加課金は発生しない。無制限化はせず、
+# 安全弁(§10「無限再試行・無制限起動の禁止」)は維持したまま実運用量に合わせて引き上げる。
 daily:
-  max_generated_posts: 3      # 1日の新規投稿上限(通常運用は1本)
-  max_tasks: 20
-  max_heavy_escalations: 3
-  max_research_fetches: 15     # source取得・登録の日次上限
-  max_est_output_chars: 300000 # 推定出力文字数の日次上限(到達・超過で生成を自動停止・代表者再開まで)
-  max_agent_launches: 12       # AI社員タスク起動(startedイベント)の日次上限
+  max_generated_posts: 3      # 1日の新規投稿上限(通常運用は1本。社員数拡張とは独立の編集ペース判断のため据え置き)
+  max_tasks: 60                 # 20→60(社員拡張分の余裕。max_agent_launches=40より十分大きく保つ)
+  max_heavy_escalations: 3      # 据え置き(heavy昇格は品質上の例外運用のまま。梓の基本モデルはheavyだが昇格枠は消費しない)
+  max_research_fetches: 20     # 15→20(梓の検証作業ぶんの余裕。source取得・登録の日次上限)
+  max_est_output_chars: 400000 # 300000→400000(推定出力文字数の日次上限。到達・超過で生成を自動停止・代表者再開まで)
+  max_agent_launches: 40       # 12→40(AI社員タスク起動(startedイベント)の日次上限。13名体制+当日実績の約2.5倍)
+  max_site_samples: 1          # V10(docs/32): 1日のサンプルサイト制作(ビルド+撮影)上限。intakeが無い日は0本
 retry:
   per_task: 2          # 超過でfailed(無制限再試行の禁止・確定§10)
   replan_days: 2

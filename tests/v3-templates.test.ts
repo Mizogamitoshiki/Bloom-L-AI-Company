@@ -23,7 +23,7 @@ import { renderPost, RightsError } from "@adapters/render/render-post";
 import { renderCarousel } from "@adapters/render/renderer";
 import { templateFor } from "@core/templates/index";
 import { carouselSpecSchema, type NewsSpec } from "@core/schemas";
-import { PLAN, NEWS_COPY, PORTFOLIO_COPY, SOURCE_A , ensureEvidenceFile } from "./fixtures";
+import { PLAN, NEWS_COPY, PORTFOLIO_COPY, COMPARE_COPY, SOURCE_A, ensureEvidenceFile } from "./fixtures";
 
 let dir: string;
 let imgDir: string;
@@ -43,7 +43,7 @@ afterEach(() => {
   rmSync(imgDir, { recursive: true, force: true });
 });
 
-function submitPlanAndCopy(postId: string, copy: unknown, pillar: "1" | "5"): void {
+function submitPlanAndCopy(postId: string, copy: unknown, pillar: "1" | "5" | "6"): void {
   const planTask = createTask(opened.db, { type: "plan_posts", title: "企画", assigneeId: "emp_sora", postId, stepKey: "plan", priority: 5 }, DATE).task;
   startTask(opened.db, planTask.id, "sora");
   submitArtifact(opened.db, planTask.id, { ...PLAN, pillar }, "sora");
@@ -132,4 +132,49 @@ describe("tpl-portfolio", () => {
     expect(parsed.anonymous).toBe(true);
     expect(parsed.displayName).toBe("泉州の工務店さま");
   }, 60_000);
+});
+
+describe("tpl-compare", () => {
+  // このdescribeブロックは配線バグの再発防止テスト(改善#1)。
+  // tpl-compareはanyCopySchema(store.ts)とbuildSpecのtpl-compare分岐(render-post.ts)の
+  // 双方に登録漏れがあり、数週間気づかれずレンダリング不能だった実例がある。
+  // compare_copyの提出(submitArtifact)とrenderPostの両方を実行に通すことで、
+  // どちらの配線が欠けても即座にテスト失敗として検知できる。
+  it("compare_copyの提出とレンダリングが通り、6ページの1080×1350がtemplateId:tpl-compareで生成される", async () => {
+    const post = createPost(opened.db, { pillar: "6", format: "carousel", title: "比較テスト", templateId: "tpl-compare" }, "aoi");
+    submitPlanAndCopy(post.id, COMPARE_COPY, "6");
+    const result = await renderPost(opened.db, post.id, "system", { outDirBase: imgDir });
+    if (result.skipped) throw new Error("skipped unexpectedly");
+    expect(result.pageCount).toBe(6);
+    const meta = await sharp(result.files[0]!).metadata();
+    expect(meta.width).toBe(1080);
+    expect(meta.height).toBe(1350);
+    const spec = opened.sqlite
+      .prepare("select content_json from artifacts where post_id = ? and kind = 'carousel_spec' order by version desc")
+      .get(post.id) as { content_json: string };
+    const parsed = carouselSpecSchema.parse(JSON.parse(spec.content_json));
+    if (parsed.templateId !== "tpl-compare") throw new Error("unexpected template");
+    expect(parsed.slides.rows.length).toBe(COMPARE_COPY.slides.rows.length);
+  }, 60_000);
+
+  it("決定的レンダリング(同一spec→同一バイト列)とexpectedPagesが6", async () => {
+    const spec = carouselSpecSchema.parse({
+      kind: "carousel_spec",
+      templateId: "tpl-compare",
+      pillar: "6",
+      sourceCopyArtifactId: "copy-test",
+      slides: COMPARE_COPY.slides,
+    });
+    const d1 = mkdtempSync(path.join(tmpdir(), "compare-a-"));
+    const d2 = mkdtempSync(path.join(tmpdir(), "compare-b-"));
+    try {
+      const r1 = await renderCarousel(spec, d1);
+      const r2 = await renderCarousel(spec, d2);
+      expect(readFileSync(r1.files[0]!).equals(readFileSync(r2.files[0]!))).toBe(true);
+      expect(templateFor("tpl-compare").expectedPages(spec)).toBe(6);
+    } finally {
+      rmSync(d1, { recursive: true, force: true });
+      rmSync(d2, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

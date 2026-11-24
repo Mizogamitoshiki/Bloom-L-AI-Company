@@ -266,6 +266,17 @@ export async function publishInstagramPost(
     remote = await client.publish(plan);
   } catch (error) {
     const safe = redactError(error, config.accessToken);
+    // prepare段階(コンテナ作成・準備待ち)の失敗はmedia_publish未到達 = Instagramには何も公開されていない。
+    // 失敗として記録し、再実行を許す(needs_reconciliationで運用を止めない)。
+    if (error instanceof MetaApiError && error.phase === "prepare") {
+      db.transaction((tx) => {
+        tx.update(t.instagramPublishJobs)
+          .set({ status: "failed", errorCode: safe.code, errorMessage: safe.message, updatedAt: nowIso() })
+          .where(eq(t.instagramPublishJobs.id, jobId)).run();
+        audit(tx, actor, "instagram_publish_failed", "post", postId, { jobId, errorCode: safe.code, phase: "prepare" });
+      });
+      throw new Error(`${safe.message}。公開前の準備段階で失敗したため、Instagramには投稿されていません。時間をおいてもう一度実行できます`);
+    }
     db.transaction((tx) => {
       tx.update(t.instagramPublishJobs)
         .set({ status: "needs_reconciliation", errorCode: safe.code, errorMessage: safe.message, updatedAt: nowIso() })
@@ -291,6 +302,51 @@ export async function publishInstagramPost(
 
 export function latestInstagramJob(db: Db, postId: string): typeof t.instagramPublishJobs.$inferSelect | null {
   return db.select().from(t.instagramPublishJobs).where(and(eq(t.instagramPublishJobs.postId, postId))).orderBy(desc(t.instagramPublishJobs.createdAt)).get() ?? null;
+}
+
+export type InstagramReconcileInput =
+  | { outcome: "not_published" }
+  | { outcome: "published"; instagramMediaId: string };
+
+/**
+ * needs_reconciliation(公開結果不明)の解消(owner専用)。
+ * 代表者がInstagramアプリで実態を確認した結果を記録する:
+ * - not_published: 投稿は存在しなかった → ジョブをfailedにし、再実行を許可する
+ * - published: 投稿されていた → メディアIDを記録し、ローカルの投稿状態もpublishedへ揃える
+ * どちらもMeta APIへのリクエストは送らない(記録のみ)。
+ */
+export function reconcileInstagramJob(
+  db: Db,
+  postId: string,
+  actor: string,
+  input: InstagramReconcileInput,
+): { jobId: string; status: string } {
+  if (actor !== "owner") throw new Error("公開結果の確認記録は代表者(owner)のみ実行できます");
+  const job = latestInstagramJob(db, postId);
+  if (!job) throw new Error("この投稿の公開ジョブがありません");
+  if (job.status !== "needs_reconciliation") {
+    throw new Error(`確認待ち(needs_reconciliation)のジョブではありません(現在: ${job.status})`);
+  }
+  if (input.outcome === "published") {
+    if (!/^\d+$/.test(input.instagramMediaId)) {
+      throw new Error("instagramMediaId(数値のメディアID)が必要です");
+    }
+    db.transaction((tx) => {
+      tx.update(t.instagramPublishJobs)
+        .set({ status: "remote_published", instagramMediaId: input.instagramMediaId, updatedAt: nowIso() })
+        .where(eq(t.instagramPublishJobs.id, job.id)).run();
+      audit(tx, actor, "instagram_publish_reconciled", "post", postId, { jobId: job.id, outcome: "published", instagramMediaId: input.instagramMediaId });
+    });
+    finishLocalRecord(db, postId, job.id, input.instagramMediaId);
+    return { jobId: job.id, status: "published" };
+  }
+  db.transaction((tx) => {
+    tx.update(t.instagramPublishJobs)
+      .set({ status: "failed", updatedAt: nowIso() })
+      .where(eq(t.instagramPublishJobs.id, job.id)).run();
+    audit(tx, actor, "instagram_publish_reconciled", "post", postId, { jobId: job.id, outcome: "not_published" });
+  });
+  return { jobId: job.id, status: "failed" };
 }
 
 // ---------- V5.2 dry-run(Metaへ一切送信しない投稿前確認) ----------

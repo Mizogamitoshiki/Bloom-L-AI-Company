@@ -24,6 +24,8 @@ export const TASK_TYPES = [
   "report",
   "meeting",
   "ingest_portfolio",
+  /** V10: サンプルサイト制作(颯)。site_sample成果物を提出し、通常コードがビルド・撮影する */
+  "build_site",
 ] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
@@ -135,6 +137,7 @@ export const TYPE_TO_DISPLAY: Record<TaskType, DisplayState> = {
   report: "creating",
   meeting: "meeting",
   ingest_portfolio: "creating",
+  build_site: "creating",
 };
 
 export const MODEL_PROFILES = ["light", "standard", "heavy"] as const;

@@ -108,7 +108,7 @@ describe("マイグレーション", () => {
     sqlite.exec("DROP INDEX improvement_decisions_proposal_sequence_uq");
     sqlite.exec("DELETE FROM schema_migrations WHERE id = 13");
     sqlite.exec(`
-      INSERT INTO departments (id, name, status) VALUES ('dept_marketing', 'AIマーケティング部', 'active');
+      -- dept_marketingは migration #14(v7-org-expansion)が新規DBへ既に作成済みのため、ここでは作らない。
       INSERT INTO employees (id, department_id, name, role, agent_ref, model_profile)
         VALUES ('emp_ren', 'dept_marketing', '蓮', '集客戦略責任者', 'ren', 'standard');
       INSERT INTO analysis_snapshots

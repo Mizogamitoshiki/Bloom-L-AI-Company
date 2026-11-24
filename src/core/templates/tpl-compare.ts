@@ -64,7 +64,7 @@ function conclusionPage(spec: CompareSpec, theme: Theme, cur: number): RenderedP
     body([
       barHeading(theme, "h2", spec.slides.verdict.heading),
       quoteCard(theme, "次の一歩", spec.slides.verdict.body, "accent"),
-      actionList(theme, ["当てはまる項目をメモする", "無料相談で優先順位を整理する"]),
+      actionList(theme, ["当てはまる項目をメモする", "気になる点はコメントかDMで教えてください"]),
     ], { gap: SPACE.lg, justify: "center" }),
     footer(theme, 6, cur),
   ]));
@@ -81,7 +81,7 @@ function buildTable(spec: CompareSpec, theme: Theme): RenderedPage[] {
           text("h1", spec.slides.cover.title, { color: theme.colors.ink }),
           text("lead", spec.slides.cover.subtitle, { color: theme.colors.inkMuted }),
         ]),
-        contentsCard(theme, "この投稿でわかること", ["導入前後の比較表", "セルフ診断チェック", "次の一歩"]),
+        contentsCard(theme, "この投稿でわかること", ["見直し前後の比較表", "セルフ診断チェック", "次の一歩"]),
         swipeHint(theme, 6),
       ], { gap: SPACE.lg, justify: "space-between" }),
       footer(theme, 6, 0, { cta: "保存" }),
@@ -91,15 +91,15 @@ function buildTable(spec: CompareSpec, theme: Theme): RenderedPage[] {
       body([
         barHeading(theme, "h2", spec.slides.intro.heading),
         quoteCard(theme, "ポイント", spec.slides.intro.body, "primary"),
-        miniChecklist(theme, "比較する観点", ["集客・信頼", "問い合わせ・時間外対応", "情報の更新しやすさ"]),
+        miniChecklist(theme, "この投稿の構成", ["現状によくあること", "見直したあとの姿", "次の一歩"]),
       ], { gap: SPACE.lg, justify: "center" }),
       footer(theme, 6, 1),
     ])),
     pg("cmp-table", page(theme, "white", [
       header(theme, "比較でわかる違い"),
       body([
-        barHeading(theme, "h2", "これまで と HP導入後"),
-        comparisonTable(theme, ["これまで", "HP導入後"], spec.slides.rows.map((r) => [r.before, r.after] as [string, string])),
+        barHeading(theme, "h2", "見直し前 と 見直し後"),
+        comparisonTable(theme, ["見直し前", "見直し後"], spec.slides.rows.map((r) => [r.before, r.after] as [string, string])),
       ], { gap: SPACE.lg, justify: "center" }),
       footer(theme, 6, 2),
     ])),
@@ -108,7 +108,7 @@ function buildTable(spec: CompareSpec, theme: Theme): RenderedPage[] {
       body([
         barHeading(theme, "h2", "ひとつでも当てはまったら"),
         el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, spec.slides.rows.map((r) => checkItem(theme, r.before, "primary"))),
-        el("div", { ...typeStyle("caption"), color: theme.colors.inkMuted }, "当てはまる項目が多いほど、HPで解決できる余地があります。"),
+        el("div", { ...typeStyle("caption"), color: theme.colors.inkMuted }, "当てはまる項目が多いほど、見直しで解決できる余地があります。"),
       ], { gap: SPACE.lg, justify: "center" }),
       footer(theme, 6, 3),
     ])),
@@ -132,7 +132,7 @@ function buildDiagnosis(spec: CompareSpec, theme: Theme): RenderedPage[] {
         ]),
         el("div", { display: "flex", flexDirection: "column", gap: SPACE.sm, backgroundColor: p.primarySoft, borderRadius: 28, padding: SPACE.lg }, [
           el("div", { ...typeStyle("label"), color: p.primaryDark }, "たとえば、こう変わる"),
-          beforeAfterCard(theme, rows[0]!.before, rows[0]!.after),
+          beforeAfterCard(theme, rows[0]!.before, rows[0]!.after, { before: "見直し前", after: "見直し後" }),
         ]),
         swipeHint(theme, 6),
       ], { gap: SPACE.lg, justify: "space-between" }),
@@ -146,7 +146,7 @@ function buildDiagnosis(spec: CompareSpec, theme: Theme): RenderedPage[] {
           el("div", { display: "flex", alignItems: "center", gap: SPACE.md, backgroundColor: "#fff", border: `2px solid ${p.line}`, borderRadius: RADIUS.md, padding: `${SPACE.md}px ${SPACE.lg}px` }, [
             el("div", { width: 46, height: 46, borderRadius: 999, backgroundColor: p.primary, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, fontWeight: 800, flexShrink: 0 }, `Q${i + 1}`),
             el("div", { fontSize: 28, fontWeight: 700, color: p.ink, display: "flex", flexGrow: 1, whiteSpace: "pre-wrap" }, r.before),
-            el("div", { display: "flex", gap: 6 }, [iconCheck(p.ok, 40), iconCross(p.inkMuted, 40)]),
+            el("div", { display: "flex", gap: 6 }, [iconCheck(p.primary, 40), iconCross(p.inkMuted, 40)]),
           ]),
         )),
       ], { gap: SPACE.lg, justify: "center" }),
@@ -156,9 +156,22 @@ function buildDiagnosis(spec: CompareSpec, theme: Theme): RenderedPage[] {
       header(theme, "診断スコア"),
       body([
         barHeading(theme, "h2", "当てはまった数で判断"),
-        scoreCard(theme, 3, Math.min(rows.length, 4), spec.slides.verdict.heading),
-        el("div", { ...typeStyle("caption"), color: p.inkMuted }, "スコアは例示(デモ)です。実際はご自身の回答数でご判断ください。"),
-      ], { gap: SPACE.lg, justify: "center" }),
+        // 紫苑QA(v8)対応: クライマックスページの密度向上。スコアと補足を縦に分散配置して空白帯をなくす
+        el("div", { display: "flex", flexDirection: "column", flexGrow: 1, justifyContent: "space-around" }, [
+          scoreCard(theme, 3, Math.min(rows.length, 4), spec.slides.verdict.heading),
+          el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, [
+            el("div", { display: "flex", gap: SPACE.md, alignItems: "center", backgroundColor: p.primarySoft, borderRadius: RADIUS.md, padding: SPACE.lg }, [
+              el("div", { fontSize: 30, fontWeight: 800, color: p.primaryDark, display: "flex" }, "0〜1個"),
+              el("div", { ...typeStyle("body"), color: p.ink, display: "flex" }, "現状の見せ方でも土台はOK。定期的な見直しを"),
+            ]),
+            el("div", { display: "flex", gap: SPACE.md, alignItems: "center", backgroundColor: p.accentSoft, borderRadius: RADIUS.md, padding: SPACE.lg }, [
+              el("div", { fontSize: 30, fontWeight: 800, color: "#8a5a0a", display: "flex" }, "2個以上"),
+              el("div", { ...typeStyle("body"), color: p.ink, display: "flex" }, "見直しの効果が出やすい状態です"),
+            ]),
+          ]),
+          el("div", { ...typeStyle("caption"), color: p.inkMuted }, "スコアは例示(デモ)です。実際はご自身の回答数でご判断ください。"),
+        ]),
+      ], { gap: SPACE.lg, justify: "flex-start" }),
       footer(theme, 6, 2),
     ])),
     pg("cmp-actions", page(theme, "soft", [
@@ -168,7 +181,7 @@ function buildDiagnosis(spec: CompareSpec, theme: Theme): RenderedPage[] {
         el("div", { display: "flex", flexDirection: "column", gap: SPACE.md }, [
           el("div", { display: "flex", flexDirection: "column", gap: SPACE.sm, backgroundColor: "#fff", border: `2px solid ${p.line}`, borderRadius: RADIUS.md, padding: SPACE.lg }, [
             el("div", { fontSize: 24, fontWeight: 800, color: p.primaryDark, display: "flex" }, "3つ以上 当てはまった方"),
-            el("div", { fontSize: 27, fontWeight: 700, color: p.ink, display: "flex", whiteSpace: "pre-wrap" }, "HPで解決できる余地が大きい状態です。まず無料相談へ。"),
+            el("div", { fontSize: 27, fontWeight: 700, color: p.ink, display: "flex", whiteSpace: "pre-wrap" }, "見直しで解決できる余地が大きい状態です。まずはDMでご相談ください。"),
           ]),
           el("div", { display: "flex", flexDirection: "column", gap: SPACE.sm, backgroundColor: "#fff", border: `2px solid ${p.line}`, borderRadius: RADIUS.md, padding: SPACE.lg }, [
             el("div", { fontSize: 24, fontWeight: 800, color: p.primaryDark, display: "flex" }, "1〜2つ の方"),

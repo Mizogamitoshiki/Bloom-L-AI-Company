@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS posts (
   rights_state text NOT NULL DEFAULT 'n/a',
   template_id text NOT NULL DEFAULT 'tpl-howto',
   portfolio_item_id text,
+  sample_id text,
   created_at date
 );
 CREATE INDEX IF NOT EXISTS posts_status_idx ON posts(status);
@@ -307,6 +308,9 @@ CREATE TABLE IF NOT EXISTS post_renders (
   design_qa_json jsonb,
   visual_qa_result text,
   visual_qa_json jsonb,
+  -- V8(D-18): レンダリング経路(satori | canva)と外部参照ID(CanvaデザインID等)
+  render_engine text NOT NULL DEFAULT 'satori',
+  external_ref text,
   created_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS post_renders_post_idx ON post_renders(post_id, created_at);
@@ -433,5 +437,61 @@ CREATE TABLE IF NOT EXISTS business_outcomes (
   created_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS business_outcomes_occurred_idx ON business_outcomes(occurred_on, kind);
+
+-- V10(docs/32): サイトサンプル。SQLite migration 18 と同期
+CREATE TABLE IF NOT EXISTS sample_requests (
+  id text PRIMARY KEY,
+  slug text NOT NULL,
+  site_title text,
+  industry text NOT NULL,
+  persona text NOT NULL,
+  plan_target text NOT NULL DEFAULT 'auto',
+  pages_json jsonb NOT NULL,
+  brief text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'new',
+  attested_at timestamptz NOT NULL,
+  attested_by text NOT NULL,
+  decline_reason text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS sample_requests_slug_uq ON sample_requests(slug);
+CREATE INDEX IF NOT EXISTS sample_requests_status_idx ON sample_requests(status, created_at);
+
+CREATE TABLE IF NOT EXISTS sample_assets (
+  id text PRIMARY KEY,
+  request_id text NOT NULL REFERENCES sample_requests(id),
+  kind text NOT NULL,
+  file_name text NOT NULL,
+  safe_relative_path text NOT NULL,
+  sha256 text NOT NULL,
+  width integer NOT NULL,
+  height integer NOT NULL,
+  bytes integer NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sample_assets_request_idx ON sample_assets(request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS sample_assets_file_uq ON sample_assets(request_id, file_name);
+
+CREATE TABLE IF NOT EXISTS site_samples (
+  id text PRIMARY KEY,
+  request_id text NOT NULL REFERENCES sample_requests(id),
+  version integer NOT NULL,
+  site_title text NOT NULL,
+  concept text NOT NULL,
+  plan_fit text NOT NULL,
+  plan_fit_reason text NOT NULL,
+  dir_path text NOT NULL,
+  html_sha256 text NOT NULL,
+  screenshots_json jsonb NOT NULL,
+  artifact_id text NOT NULL,
+  builder_task_id text NOT NULL,
+  design_qa_result text,
+  design_qa_json jsonb,
+  deploy_url text,
+  deployed_at timestamptz,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS site_samples_request_idx ON site_samples(request_id, version);
 
 COMMIT;

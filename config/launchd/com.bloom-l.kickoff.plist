@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.bloom-l.kickoff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/mizokamimirai/Desktop/mizogamitoshiki/Bloom-L-AI-Company/scripts/shift-runner.sh</string>
+    <string>kickoff</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/mizokamimirai/Desktop/mizogamitoshiki/Bloom-L-AI-Company</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/mizokamimirai/.nvm/versions/node/v24.14.0/bin:/Users/mizokamimirai/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>/Users/mizokamimirai</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>/Users/mizokamimirai/Desktop/mizogamitoshiki/Bloom-L-AI-Company/logs/cron/kickoff.log</string>
+  <key>StandardErrorPath</key><string>/Users/mizokamimirai/Desktop/mizogamitoshiki/Bloom-L-AI-Company/logs/cron/kickoff.log</string>
+</dict>
+</plist>

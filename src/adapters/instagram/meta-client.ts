@@ -12,7 +12,15 @@ export interface MetaPublishResult {
   instagramMediaId: string;
 }
 
+/**
+ * 公開処理のどの段階で失敗したか。
+ * - prepare: コンテナ作成・準備待ち。media_publish未到達のため「Instagramには何も公開されていない」と断定できる
+ * - publish: media_publish呼び出し中。公開されたか不明(要リコンサイル)
+ */
+export type MetaPublishPhase = "prepare" | "publish";
+
 export class MetaApiError extends Error {
+  public phase?: MetaPublishPhase;
   constructor(public readonly safeCode: string, message: string) {
     super(message);
     this.name = "MetaApiError";
@@ -52,22 +60,55 @@ export class MetaInstagramClient {
     return id;
   }
 
+  /**
+   * コンテナ作成直後の状態照会は、Meta側の伝播遅延により一時的にエラーが返ることがある:
+   * - 9007「Media ID is not available」(実運用2026-07-19に発生。準備完了前の照会で返る)
+   * - 100「Unsupported get request」(作成直後のID未伝播)
+   * これらは「まだ準備中」を意味するため失敗にせずポーリングを続行する(上限で打ち切り)。
+   */
+  private static readonly TRANSIENT_POLL_CODES = new Set(["9007", "100"]);
+
   private async waitUntilReady(containerId: string): Promise<void> {
-    for (let attempt = 0; attempt < 12; attempt++) {
+    for (let attempt = 0; attempt < 30; attempt++) {
       const url = new URL(this.endpoint(containerId));
       url.searchParams.set("fields", "status_code");
       url.searchParams.set("access_token", this.config.accessToken);
       const response = await this.fetchFn(url, { method: "GET" });
       const json: unknown = await response.json().catch(() => ({}));
-      if (!response.ok) throw safeApiError(response.status, json);
+      if (!response.ok) {
+        const error = safeApiError(response.status, json);
+        if (MetaInstagramClient.TRANSIENT_POLL_CODES.has(error.safeCode)) {
+          await this.wait(2_000);
+          continue;
+        }
+        throw error;
+      }
       const status = (json as StatusResponse).status_code;
       if (status === "FINISHED" || status === "PUBLISHED") return;
       if (status === "ERROR" || status === "EXPIRED") {
         throw new MetaApiError(`CONTAINER_${status}`, `Instagramメディアコンテナが${status}になりました`);
       }
-      await this.wait(1_000);
+      await this.wait(2_000);
     }
     throw new MetaApiError("CONTAINER_TIMEOUT", "Instagramメディアコンテナの準備が時間内に完了しませんでした");
+  }
+
+  /** 段階タグ付き実行。prepare段階の失敗は「未公開」と断定でき、呼び出し側が安全に再試行を許可できる */
+  private async inPhase<T>(phase: MetaPublishPhase, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (error instanceof MetaApiError) {
+        error.phase ??= phase;
+        throw error;
+      }
+      const wrapped = new MetaApiError(
+        phase === "publish" ? "PUBLISH_UNKNOWN" : "PREPARE_FAILED",
+        error instanceof Error ? error.message : String(error),
+      );
+      wrapped.phase = phase;
+      throw wrapped;
+    }
   }
 
   async publish(plan: InstagramPublishPlan): Promise<MetaPublishResult> {
@@ -77,25 +118,33 @@ export class MetaInstagramClient {
     if (plan.caption.length > 2_200) throw new Error("Instagramキャプションは2,200文字以内にしてください");
 
     if (plan.kind === "image") {
-      const containerId = await this.post(`${this.config.igUserId}/media`, {
-        image_url: plan.mediaUrls[0]!, caption: plan.caption,
+      const containerId = await this.inPhase("prepare", async () => {
+        const id = await this.post(`${this.config.igUserId}/media`, {
+          image_url: plan.mediaUrls[0]!, caption: plan.caption,
+        });
+        await this.waitUntilReady(id);
+        return id;
       });
-      await this.waitUntilReady(containerId);
-      const instagramMediaId = await this.post(`${this.config.igUserId}/media_publish`, { creation_id: containerId });
+      const instagramMediaId = await this.inPhase("publish", () =>
+        this.post(`${this.config.igUserId}/media_publish`, { creation_id: containerId }));
       return { childContainerIds: [], containerId, instagramMediaId };
     }
 
-    const childContainerIds: string[] = [];
-    for (const imageUrl of plan.mediaUrls) {
-      const id = await this.post(`${this.config.igUserId}/media`, { image_url: imageUrl, is_carousel_item: "true" });
-      await this.waitUntilReady(id);
-      childContainerIds.push(id);
-    }
-    const containerId = await this.post(`${this.config.igUserId}/media`, {
-      media_type: "CAROUSEL", children: childContainerIds.join(","), caption: plan.caption,
+    const { childContainerIds, containerId } = await this.inPhase("prepare", async () => {
+      const children: string[] = [];
+      for (const imageUrl of plan.mediaUrls) {
+        const id = await this.post(`${this.config.igUserId}/media`, { image_url: imageUrl, is_carousel_item: "true" });
+        await this.waitUntilReady(id);
+        children.push(id);
+      }
+      const carouselId = await this.post(`${this.config.igUserId}/media`, {
+        media_type: "CAROUSEL", children: children.join(","), caption: plan.caption,
+      });
+      await this.waitUntilReady(carouselId);
+      return { childContainerIds: children, containerId: carouselId };
     });
-    await this.waitUntilReady(containerId);
-    const instagramMediaId = await this.post(`${this.config.igUserId}/media_publish`, { creation_id: containerId });
+    const instagramMediaId = await this.inPhase("publish", () =>
+      this.post(`${this.config.igUserId}/media_publish`, { creation_id: containerId }));
     return { childContainerIds, containerId, instagramMediaId };
   }
 }

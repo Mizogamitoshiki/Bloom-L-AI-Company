@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { limitsSchema, type Limits } from "../core/schemas";
+import { limitsSchema, pricingSchema, type Limits, type Pricing, type PriceBand, type PlanId } from "../core/schemas";
 import { findRepoRoot } from "./root";
 
 let cachedLimits: Limits | null = null;
@@ -15,6 +15,22 @@ export function loadLimits(root: string = findRepoRoot()): Limits {
   const raw = readFileSync(path.join(root, "config", "limits.yaml"), "utf8");
   cachedLimits = limitsSchema.parse(parseYaml(raw));
   return cachedLimits;
+}
+
+let cachedPricing: Pricing | null = null;
+
+/** V10: 承認済み価格帯(config/pricing.yaml)。AIは価格を書かず、通常コードがここから注入する */
+export function loadPricing(root: string = findRepoRoot()): Pricing {
+  if (cachedPricing) return cachedPricing;
+  const raw = readFileSync(path.join(root, "config", "pricing.yaml"), "utf8");
+  cachedPricing = pricingSchema.parse(parseYaml(raw));
+  return cachedPricing;
+}
+
+/** planId → 投稿へ注入する価格帯(スキーマ検証済み) */
+export function priceBandFor(planId: PlanId, pricing: Pricing = loadPricing()): PriceBand {
+  const band = pricing.approved_public_price_bands[planId];
+  return { planId, label: band.label, build: band.build, maintenance: band.maintenance, disclaimer: pricing.disclaimer };
 }
 
 export interface BrandTokens {

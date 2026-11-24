@@ -27,7 +27,7 @@
 | 02 | [02-assumptions-and-open-questions.md](02-assumptions-and-open-questions.md) | 仮定・未確定事項・代表者への質問(5問) | 代表者(承認前に必読) |
 | 03 | [03-business-and-sns-strategy.md](03-business-and-sns-strategy.md) | 事業・料金プラン検証・SNS戦略 | 代表者 |
 | 04 | [04-ai-company-organization.md](04-ai-company-organization.md) | AI組織・会議体 | 全員 |
-| 05 | [05-agent-specifications.md](05-agent-specifications.md) | AI社員9名の仕様 | 実装者 |
+| 05 | [05-agent-specifications.md](05-agent-specifications.md) | AI社員13名の仕様(2026-07-17拡張) | 実装者 |
 | 06 | [06-workflows-and-state-machines.md](06-workflows-and-state-machines.md) | ワークフロー・状態遷移・例外 | 実装者 |
 | 07 | [07-system-architecture.md](07-system-architecture.md) | システム構成・コンポーネント | 実装者 |
 | 08 | [08-data-model.md](08-data-model.md) | データモデル・ER図 | 実装者 |
@@ -46,6 +46,10 @@
 | 25 | [25-v5-instagram-official-publishing.md](25-v5-instagram-official-publishing.md) | V5 Instagram公式API公開・安全運用 | 代表者+実装者 |
 | 26 | [26-v54-vercel-cloud-readiness.md](26-v54-vercel-cloud-readiness.md) | V5.4 Vercelクラウド対応基盤(移行準備) | 代表者+実装者 |
 | 27 | [27-v6-growth-loop.md](27-v6-growth-loop.md) | V6 投稿後分析・CEO承認型改善ループ・Cron準備 | 代表者+実装者 |
+| 28 | [28-instagram-story-guide.md](28-instagram-story-guide.md) | V8 ストーリー運用・デザインガイド(市場調査ベース) | 代表者+実装者 |
+| 29 | [29-canva-claude-capability-matrix.md](29-canva-claude-capability-matrix.md) | V8 Canva×Claude能力マトリクス(検証済み事実台帳) | 代表者+実装者 |
+| 30 | [30-workday-operating-model.md](30-workday-operating-model.md) | V8 勤務モデル(3シフト制・全員配置・Threads判断材料) | 代表者+実装者 |
+| 32 | [32-v10-daily-site-sample.md](32-v10-daily-site-sample.md) | V10 1日1サイトサンプル→Instagram投稿の設計案(D-19・未決定) | 代表者+実装者 |
 | — | [DECISIONS.md](DECISIONS.md) | 設計判断記録(比較表付き) | 実装者 |
 | — | [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md) | 実装引き継ぎ資料 | 実装者(実装開始時に最初に読む) |
 

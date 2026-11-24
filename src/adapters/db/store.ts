@@ -6,7 +6,8 @@
  * - リトライ上限・冪等性・状態遷移ガード・参照存在確認をここで強制
  * - 複数書き込みを伴う操作は1トランザクション(途中失敗で全ロールバック)
  */
-import { existsSync, statSync, rmSync, renameSync } from "node:fs";
+import { existsSync, statSync, rmSync, renameSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import nodePath from "node:path";
 import { writeBundleToDir, type BundleData } from "../export/bundle-writer";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
@@ -31,6 +32,9 @@ import {
   copyArtifactSchema,
   newsCopyArtifactSchema,
   portfolioCopyArtifactSchema,
+  compareCopyArtifactSchema,
+  sampleCopyArtifactSchema,
+  type SampleCopy,
   sourceInputSchema,
   meetingMinutesArtifactSchema,
   type MeetingMinutesArtifact,
@@ -50,6 +54,7 @@ import {
   type Copy,
   type NewsCopy,
   type PortfolioCopy,
+  type CompareCopy,
   type SourceInput,
   type TemplateId,
 } from "../../core/schemas";
@@ -65,12 +70,13 @@ import {
   containsLatestPhrase,
   matchesSourceRequiredPattern,
 } from "../../core/guards";
-import { loadForbiddenPhrases, loadQaRules } from "../config";
+import { loadForbiddenPhrases, loadQaRules, loadPricing } from "../config";
+import { findPriceViolations } from "../../core/sample-guards";
 import { normalizeHttpUrl, assertSafeHttpUrl } from "../../core/urls";
 
-/** 3種のコピー成果物を判別して検証する */
-const anyCopySchema = z.union([copyArtifactSchema, newsCopyArtifactSchema, portfolioCopyArtifactSchema]);
-export type AnyCopy = Copy | NewsCopy | PortfolioCopy;
+/** 4種のコピー成果物を判別して検証する(V4.5 4系統: howto/news/portfolio/compare) */
+const anyCopySchema = z.union([copyArtifactSchema, newsCopyArtifactSchema, portfolioCopyArtifactSchema, compareCopyArtifactSchema, sampleCopyArtifactSchema]);
+export type AnyCopy = Copy | NewsCopy | PortfolioCopy | CompareCopy | SampleCopy;
 import {
   type TaskEventType,
   type TaskStatus,
@@ -642,6 +648,8 @@ export interface CreatePostInput {
   plannedDate?: string;
   templateId?: TemplateId;
   portfolioItemId?: string;
+  /** V10: tpl-sample が紹介するサンプルサイト(site_samples.id)。紬の視覚QA合格が必須 */
+  sampleId?: string;
 }
 
 export function createPost(db: Db, input: CreatePostInput, actor = "system"): typeof t.posts.$inferSelect {
@@ -682,6 +690,17 @@ export function createPost(db: Db, input: CreatePostInput, actor = "system"): ty
       const item = tx.select().from(t.portfolioItems).where(eq(t.portfolioItems.id, input.portfolioItemId)).get();
       if (!item) throw new Error(`実績が見つかりません: ${input.portfolioItemId}`);
     }
+    // V10: サンプル投稿は紬の視覚QA(忠実度)に合格したサンプルだけを紹介できる
+    if (templateId === "tpl-sample") {
+      if (!input.sampleId) throw new Error("tpl-sampleにはsampleId(site_samples.id)が必要です");
+      const sample = tx.select().from(t.siteSamples).where(eq(t.siteSamples.id, input.sampleId)).get();
+      if (!sample) throw new Error(`サンプルサイトが見つかりません: ${input.sampleId}`);
+      if (sample.designQaResult !== "pass") {
+        throw new Error("サンプルサイトは紬の視覚QA(忠実度)に合格していません(company sample-visual-qa --sample <id> --actor tsumugi)");
+      }
+    } else if (input.sampleId) {
+      throw new Error("sampleIdはtpl-sampleでのみ指定できます");
+    }
 
     const id = ulid();
     tx.insert(t.posts)
@@ -696,10 +715,11 @@ export function createPost(db: Db, input: CreatePostInput, actor = "system"): ty
         rightsState: "n/a",
         templateId,
         portfolioItemId: input.portfolioItemId ?? null,
+        sampleId: input.sampleId ?? null,
         createdAt: today,
       })
       .run();
-    audit(tx, actor, "post_create", "post", id, { title: input.title, pillar: input.pillar, templateId });
+    audit(tx, actor, "post_create", "post", id, { title: input.title, pillar: input.pillar, templateId, ...(input.sampleId ? { sampleId: input.sampleId } : {}) });
     return tx.select().from(t.posts).where(eq(t.posts.id, id)).get()!;
   });
 }
@@ -1088,6 +1108,13 @@ function assertPublicTextSafety(conn: DbConn, post: typeof t.posts.$inferSelect,
   if (violations.length > 0) {
     throw new Error(
       `公開許可のない顧客名がテキストに含まれています / 許可範囲外の顧客データ: ${violations.map((v) => v.detail).join(", ")}(実績画面で許可範囲を記録してください)`,
+    );
+  }
+  // V10(docs/32 §8.2): 価格表記は承認済み価格帯(config/pricing.yaml)だけ。それ以外の「円」表記は拒否(AIは価格を書かない)
+  const prices = findPriceViolations(text, loadPricing());
+  if (prices.length > 0) {
+    throw new Error(
+      `承認されていない価格表記を検出: ${prices.map((p) => `「${p}」`).join(" ")}(投稿に書ける価格は config/pricing.yaml の承認済み価格帯のみ。確定価格・値引き・納期の金額は代表者決定が必要)`,
     );
   }
   const rules = loadQaRules();
@@ -1678,6 +1705,65 @@ export interface CompanyStateView {
   counts: { awaitingApproval: number; errors: number; running: number };
   /** V3-H: 生成停止中はその理由(nullなら通常運転) */
   generationPause: GenerationPause | null;
+  /** 改善#9: 日次上限の使用量・残数(実際の制限判定と同一クエリ・同一JST業務日基準) */
+  usageLimits: UsageLimitStatus[];
+}
+
+export interface UsageLimitStatus {
+  key: string;
+  label: string;
+  used: number;
+  limit: number;
+  remaining: number;
+}
+
+/**
+ * 日次上限の使用量サマリ(読み取りのみ)。各カウントは実際の制限判定(createTask/startTask/
+ * recordHeavyEscalation/createPost/addSource/createTask内のusage集計)と同一クエリ・同一の
+ * JST業務日基準(businessDate())を使う。表示用に別ロジックで再計算すると数値が食い違うため。
+ */
+export function usageLimitStatus(db: Db): UsageLimitStatus[] {
+  const limits = loadLimits();
+  const today = businessDate();
+  const tasksToday = (db.select({ n: sql<number>`count(*)` }).from(t.tasks).where(eq(t.tasks.runDate, today)).get()?.n) ?? 0;
+  const launchesToday =
+    (db
+      .select({ n: sql<number>`count(*)` })
+      .from(t.taskEvents)
+      .where(and(eq(t.taskEvents.type, "started"), sql`${jstDateOfTs} = ${today}`))
+      .get()?.n) ?? 0;
+  const heavyToday =
+    (db
+      .select({ n: sql<number>`count(*)` })
+      .from(t.auditLog)
+      .where(and(eq(t.auditLog.action, "heavy_escalation"), sql`${jstDateOfTs} = ${today}`))
+      .get()?.n) ?? 0;
+  const postsToday = (db.select({ n: sql<number>`count(*)` }).from(t.posts).where(eq(t.posts.createdAt, today)).get()?.n) ?? 0;
+  const fetchesToday = (db.select({ n: sql<number>`count(*)` }).from(t.sources).where(eq(t.sources.checkedAt, today)).get()?.n) ?? 0;
+  const outputCharsToday =
+    (db
+      .select({ n: sql<number>`coalesce(sum(est_output_chars),0)` })
+      .from(t.usageRecords)
+      .where(sql`${jstDateOfTs} = ${today}`)
+      .get()?.n) ?? 0;
+
+  const samplesToday =
+    (db
+      .select({ n: sql<number>`count(*)` })
+      .from(t.siteSamples)
+      .where(sql`date(${t.siteSamples.createdAt}, '+9 hours') = ${today}`)
+      .get()?.n) ?? 0;
+
+  const rows: { key: string; label: string; used: number; limit: number }[] = [
+    { key: "max_tasks", label: "日次タスク作成", used: tasksToday, limit: limits.daily.max_tasks },
+    { key: "max_site_samples", label: "サンプルサイト制作", used: samplesToday, limit: limits.daily.max_site_samples },
+    { key: "max_agent_launches", label: "エージェント起動", used: launchesToday, limit: limits.daily.max_agent_launches },
+    { key: "max_heavy_escalations", label: "heavyモデル昇格", used: heavyToday, limit: limits.daily.max_heavy_escalations },
+    { key: "max_generated_posts", label: "新規投稿作成", used: postsToday, limit: limits.daily.max_generated_posts },
+    { key: "max_research_fetches", label: "リサーチ取得", used: fetchesToday, limit: limits.daily.max_research_fetches },
+    { key: "max_est_output_chars", label: "推定出力文字数", used: outputCharsToday, limit: limits.daily.max_est_output_chars },
+  ];
+  return rows.map((r) => ({ ...r, remaining: Math.max(0, r.limit - r.used) }));
 }
 
 export function getCompanyState(db: Db, now: Date = new Date()): CompanyStateView {
@@ -1756,6 +1842,7 @@ export function getCompanyState(db: Db, now: Date = new Date()): CompanyStateVie
       running: views.filter((v) => ["researching", "meeting", "creating", "qa"].includes(v.display.state)).length,
     },
     generationPause: getGenerationPause(db),
+    usageLimits: usageLimitStatus(db),
   };
 }
 
@@ -2100,6 +2187,7 @@ export interface PublishReadyItem {
     status: string;
     mode: string;
     instagramMediaId: string | null;
+    errorMessage: string | null;
     updatedAt: string;
   } | null;
 }
@@ -2147,6 +2235,7 @@ export function listPublishReady(db: Db): PublishReadyItem[] {
         status: t.instagramPublishJobs.status,
         mode: t.instagramPublishJobs.mode,
         instagramMediaId: t.instagramPublishJobs.instagramMediaId,
+        errorMessage: t.instagramPublishJobs.errorMessage,
         updatedAt: t.instagramPublishJobs.updatedAt,
       })
       .from(t.instagramPublishJobs)
@@ -2326,6 +2415,19 @@ export function latestApprovedTemplateVersion(db: Db, templateId: string): Templ
   );
 }
 
+/**
+ * レンダリングに使うテンプレート版を選ぶ(「承認したのに未承認と言われる」対策)。
+ * 最新の承認済み版のコードが現行実装と一致していれば、後続番号に未決定のdraft版が
+ * 残っていてもその承認済み版を使う(draft版が刻印されexportが構造的に止まる事故を防ぐ)。
+ * コードが承認時から変わっている場合のみ現行版(最大番号)へ進み、従来どおり
+ * 代表者が新版を承認するまでexportは止まる(安全ゲートは弱めない)。
+ */
+export function renderTemplateVersion(db: Db, templateId: string): number {
+  const approved = latestApprovedTemplateVersion(db, templateId);
+  if (approved && templateFingerprintMatchesCurrent(db, templateId, approved.version)) return approved.version;
+  return currentTemplateVersion(db, templateId);
+}
+
 /** テンプレート版の承認/却下/修正依頼(owner専用)。自己承認は不可。audit記録 */
 export function decideTemplateVersion(
   db: Db,
@@ -2368,6 +2470,10 @@ export function recordPostRender(
     variant: string;
     fingerprint: string;
     designQa: DesignQaResult;
+    /** V8(D-18): satori(既定)/ canva(全ページ外部)/ hybrid(表紙のみ外部+本文Satori)。satori以外はfingerprintに画像内容ハッシュを持つ */
+    renderEngine?: "satori" | "canva" | "hybrid";
+    /** V8: 外部レンダリングの参照(CanvaデザインID等) */
+    externalRef?: string;
   },
   actor = "system",
 ): string {
@@ -2384,6 +2490,8 @@ export function recordPostRender(
         fingerprint: input.fingerprint,
         designQaResult: input.designQa.result,
         designQaJson: JSON.stringify(input.designQa),
+        renderEngine: input.renderEngine ?? "satori",
+        externalRef: input.externalRef ?? null,
         createdAt: nowIso(),
       })
       .run();
@@ -2393,9 +2501,45 @@ export function recordPostRender(
       variant: input.variant,
       fingerprint: input.fingerprint,
       designQa: input.designQa.result,
+      renderEngine: input.renderEngine ?? "satori",
     });
   });
   return id;
+}
+
+/**
+ * V8(D-18): 外部レンダリング(canva)の画像内容ハッシュ。
+ * spec配下のimage成果物をページ順にSHA-256し、その連結を再ハッシュする。
+ * QA後のファイル差し替えをexport時に決定的に検知するための content-addressed fingerprint。
+ */
+export function computeExternalRenderHash(conn: DbConn, specArtifactId: string): string {
+  const images = conn
+    .select()
+    .from(t.artifacts)
+    .where(eq(t.artifacts.kind, "image"))
+    .all()
+    .filter((a) => {
+      if (!a.contentJson) return false;
+      try {
+        return imageMetaSchema.parse(JSON.parse(a.contentJson)).specArtifactId === specArtifactId;
+      } catch {
+        return false;
+      }
+    })
+    .sort((a, b) => {
+      const pa = imageMetaSchema.parse(JSON.parse(a.contentJson!)).page;
+      const pb = imageMetaSchema.parse(JSON.parse(b.contentJson!)).page;
+      return pa - pb;
+    });
+  if (images.length === 0) throw new Error(`画像成果物がありません(spec: ${specArtifactId})`);
+  const hash = createHash("sha256");
+  for (const img of images) {
+    if (!img.filePath || !existsSync(img.filePath)) {
+      throw new Error(`画像ファイルが存在しません(${img.filePath ?? img.id})`);
+    }
+    hash.update(createHash("sha256").update(readFileSync(img.filePath)).digest("hex"));
+  }
+  return `canva-${hash.digest("hex")}`;
 }
 
 /** 投稿の最新レンダリング記録 */
@@ -2420,16 +2564,46 @@ export function assertExportableTemplate(db: Db, postId: string): { templateId: 
   if (render.visualQaResult !== "pass") {
     throw new Error("紫苑の視覚QA(visual QA)に合格していない画像は書き出せません(未実施または fail)");
   }
+  // V8(D-18): Canva/ハイブリッド外部レンダリングはコード版fingerprintを持たない。
+  // 代わりに画像内容ハッシュの再計算一致でQA後の差し替え・改変を検知する(こちらの方が外部出力には厳密)。
+  // テンプレート版の代表者承認は適用外だが、投稿自体の承認(decidePost)は全経路共通で必須。
+  if (render.renderEngine !== "satori") {
+    const recomputed = computeExternalRenderHash(db, render.specArtifactId);
+    if (recomputed !== render.fingerprint) {
+      throw new Error(
+        "外部レンダリング画像(Canva/ハイブリッド)の内容がQA時と一致しません(差し替え・改変の可能性)。再登録し、視覚QAを再実施してください",
+      );
+    }
+    return { templateId: render.templateId, version: render.templateVersion, fingerprint: render.fingerprint };
+  }
   const tv = getTemplateVersion(db, render.templateId, render.templateVersion);
   if (!tv || tv.status !== "approved") {
-    throw new Error("このテンプレート版は代表者に承認されていません。承認前のテンプレートでは公開できません");
+    const stateLabel = !tv
+      ? "未登録"
+      : tv.status === "draft"
+        ? "確認待ち(draft)"
+        : tv.status === "rejected"
+          ? "却下済み"
+          : tv.status === "revision_requested"
+            ? "修正依頼中"
+            : tv.status;
+    throw new Error(
+      `このテンプレート版は代表者に承認されていません(この画像は ${render.templateId} v${render.templateVersion}・状態: ${stateLabel})。` +
+        `/templates で v${render.templateVersion} を承認するか、承認済みの版で再レンダリングしてください`,
+    );
   }
   if (render.fingerprint !== tv.fingerprint) {
-    throw new Error("テンプレートのfingerprintが承認時と一致しません(旧版または改変の可能性)");
+    throw new Error(
+      `テンプレートのfingerprintが承認時と一致しません(${render.templateId} v${render.templateVersion}。旧版または改変の可能性)。` +
+        `pnpm company render --post <postId> で再レンダリングし、紫苑の視覚QAを再実施してください`,
+    );
   }
   const latest = latestApprovedTemplateVersion(db, render.templateId);
   if (!latest || render.templateVersion !== latest.version) {
-    throw new Error("承認済みの最新テンプレート版で再レンダリングされていません(旧版の画像は公開できません)");
+    throw new Error(
+      `承認済みの最新テンプレート版で再レンダリングされていません(この画像は ${render.templateId} v${render.templateVersion}・最新承認版は v${latest?.version ?? "なし"})。` +
+        `pnpm company render --post <postId> で再レンダリングし、紫苑の視覚QAを再実施してください`,
+    );
   }
   return { templateId: render.templateId, version: render.templateVersion, fingerprint: render.fingerprint };
 }
